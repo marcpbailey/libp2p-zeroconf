@@ -99,6 +99,9 @@ func (s *Server) stopLocked(err error) {
 	if s.isShutdown {
 		return
 	}
+	if err != nil {
+		s.withdrawEstablished()
+	}
 	s.isShutdown = true
 	s.terminalErr = err
 	if err != nil {
@@ -354,20 +357,41 @@ func identicalRecord(a, b dns.RR) bool {
 	return dns.IsDuplicate(a, b)
 }
 
+// Only authority records that answer the peer's question participate in its
+// simultaneous probe. A different class or unrelated type is not a proposal
+// for that question (RFC 6762 sections 6 and 8.2).
+func probeAnswers(records []dns.RR, question dns.Question) []dns.RR {
+	var answers []dns.RR
+	class := question.Qclass & ^qClassCacheFlush
+	for _, rr := range records {
+		if rr == nil || !sameMDNSName(rr.Header().Name, question.Name) {
+			continue
+		}
+		if class != dns.ClassANY && rr.Header().Class & ^qClassCacheFlush != class {
+			continue
+		}
+		if question.Qtype != dns.TypeANY && rr.Header().Rrtype != question.Qtype && rr.Header().Rrtype != dns.TypeCNAME {
+			continue
+		}
+		answers = append(answers, rr)
+	}
+	return answers
+}
+
 func (s *Server) observeProbe(msg *dns.Msg, index int, p *interfaceProbe, now time.Time) {
 	if p.sent == 0 {
 		return
 	}
 	proposed := s.proposedRecords(index)
 	for _, q := range msg.Question {
-		if q.Qtype != dns.TypeANY || q.Qclass & ^qClassCacheFlush != dns.ClassINET {
+		if q.Qclass & ^qClassCacheFlush != dns.ClassINET && q.Qclass & ^qClassCacheFlush != dns.ClassANY {
 			continue
 		}
-		own, err := recordSet(proposed, q.Name)
+		own, err := recordSet(probeAnswers(proposed, q), q.Name)
 		if err != nil || len(own) == 0 {
 			continue
 		}
-		other, err := recordSet(msg.Ns, q.Name)
+		other, err := recordSet(probeAnswers(msg.Ns, q), q.Name)
 		if err != nil || len(other) == 0 {
 			continue
 		}

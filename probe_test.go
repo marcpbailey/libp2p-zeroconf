@@ -433,3 +433,90 @@ func TestConcurrentLifecycleMethods(t *testing.T) {
 	wg.Wait()
 	<-s.Done()
 }
+
+func TestSimultaneousProbeIgnoresAuthorityOutsideQuestionClass(t *testing.T) {
+	s, _ := protocolServer(t)
+	s.stepProbes(time.Unix(1, 0))
+	peer := s.probeMessage(1).Copy()
+	for _, rr := range peer.Ns {
+		rr.Header().Class = dns.ClassCHAOS
+	}
+	s.observeProbe(peer, 1, s.probes[1], time.Unix(2, 0))
+	if s.probes[1].sent != 1 {
+		t.Fatal("authority records outside the question class changed probe state")
+	}
+}
+
+func TestSimultaneousProbeHandlesSpecificRecordQuestion(t *testing.T) {
+	s, _ := protocolServer(t)
+	s.stepProbes(time.Unix(1, 0))
+	peer := s.probeMessage(1).Copy()
+	peer.Question = []dns.Question{{Name: s.service.ServiceInstanceName(), Qtype: dns.TypeSRV, Qclass: dns.ClassINET}}
+	for _, rr := range peer.Ns {
+		if srv, ok := rr.(*dns.SRV); ok {
+			srv.Port++
+		}
+	}
+	s.observeProbe(peer, 1, s.probes[1], time.Unix(2, 0))
+	if s.probes[1].sent != 0 || !s.probes[1].next.Equal(time.Unix(3, 0)) {
+		t.Fatal("valid SRV probe did not trigger one-second tiebreak retry")
+	}
+}
+
+func TestProbeIgnoresResponseFromNonMDNSSourcePort(t *testing.T) {
+	s, _ := protocolServer(t)
+	s.stepProbes(time.Unix(1, 0))
+	wire, err := response(conflicting(s)).Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := &net.UDPAddr{IP: net.ParseIP("192.0.2.99"), Port: mdnsWildcardAddrIPv4.Port + 1}
+	if err := s.parsePacket(wire, 1, from); err != nil {
+		t.Fatal(err)
+	}
+	if s.isShutdown {
+		t.Fatal("response from an unrelated source port terminated registration")
+	}
+	from.Port = mdnsWildcardAddrIPv4.Port
+	var conflict *ConflictError
+	if err := s.parsePacket(wire, 1, from); !errors.As(err, &conflict) {
+		t.Fatalf("valid mDNS conflict was not reported: %v", err)
+	}
+}
+
+func TestInitialConflictWithdrawsAlreadyEstablishedOtherLink(t *testing.T) {
+	s, _ := protocolServer(t)
+	s.ifaces = append(s.ifaces, net.Interface{Index: 2})
+	s.probes[2] = &interfaceProbe{sent: 1, next: time.Unix(4, 0)}
+	establish(s)
+	var withdrawn []int
+	s.send = func(msg *dns.Msg, index int) error {
+		if msg.Response && len(msg.Answer) > 0 && msg.Answer[0].Header().Ttl == 0 {
+			withdrawn = append(withdrawn, index)
+		}
+		return nil
+	}
+	err := s.observeResponse(response(conflicting(s)), 2, s.probes[2], time.Unix(3, 0))
+	if err == nil {
+		t.Fatal("missing initial conflict on second link")
+	}
+	<-s.Done()
+	if len(withdrawn) != 1 || withdrawn[0] != 1 {
+		t.Fatalf("withdrawn links = %v, want established link 1 only", withdrawn)
+	}
+}
+
+func TestShutdownDuringTiebreakRetry(t *testing.T) {
+	s, packets := protocolServer(t)
+	s.stepProbes(time.Unix(1, 0))
+	s.probes[1].restart(time.Unix(2, 0), time.Second)
+	count := len(*packets)
+	s.Shutdown()
+	s.stepProbes(time.Unix(3, 0))
+	if len(*packets) != count {
+		t.Fatal("canceled retry sent more packets")
+	}
+	if !errors.Is(s.WaitForReady(context.Background()), ErrServerClosed) {
+		t.Fatal("canceled retry did not release initial readiness wait")
+	}
+}

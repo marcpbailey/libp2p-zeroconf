@@ -294,19 +294,25 @@ func (s *Server) TTL(ttl uint32) {
 func (s *Server) Shutdown() {
 	s.mu.Lock()
 	if !s.isShutdown {
-		for index, state := range s.probes {
-			if state.established {
-				if err := s.announce(index, 0); err != nil {
-					log.Printf("failed to unregister: %s", err)
-				}
-			}
-		}
+		s.withdrawEstablished()
 		s.stopLocked(nil)
 	}
 	done := s.done
 	s.mu.Unlock()
 	if done != nil {
 		<-done
+	}
+}
+
+// Caller holds mu. A failed registration must also withdraw records already
+// established on other links, without sending a goodbye on a tentative link.
+func (s *Server) withdrawEstablished() {
+	for index, state := range s.probes {
+		if state.established {
+			if err := s.announce(index, 0); err != nil {
+				log.Printf("failed to unregister: %s", err)
+			}
+		}
 	}
 }
 
@@ -376,6 +382,21 @@ func (s *Server) parsePacket(packet []byte, ifIndex int, from net.Addr) error {
 	if err := msg.Unpack(packet); err != nil {
 		// log.Printf("[ERR] zeroconf: Failed to unpack packet: %v", err)
 		return err
+	}
+	// mDNS responses must originate from the mDNS port. Queries from
+	// ephemeral ports remain valid legacy queries (RFC 6762 section 6).
+	if msg.Response {
+		source, ok := from.(*net.UDPAddr)
+		if !ok || source == nil {
+			return nil
+		}
+		port := ipv4Addr.Port
+		if source.IP.To4() == nil {
+			port = ipv6Addr.Port
+		}
+		if source.Port != port {
+			return nil
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -767,7 +788,7 @@ func (s *Server) multicastResponse(msg *dns.Msg, ifIndex int) error {
 			default:
 				iface, _ := net.InterfaceByIndex(ifIndex)
 				if err := s.ipv4conn.SetMulticastInterface(iface); err != nil {
-					log.Printf("[WARN] mdns: Failed to set multicast interface: %v", err)
+					return fmt.Errorf("failed to set multicast interface: %w", err)
 				}
 			}
 			if _, err := s.ipv4conn.WriteTo(buf, &wcm, ipv4Addr); err != nil {
@@ -780,7 +801,7 @@ func (s *Server) multicastResponse(msg *dns.Msg, ifIndex int) error {
 					wcm.IfIndex = intf.Index
 				default:
 					if err := s.ipv4conn.SetMulticastInterface(&intf); err != nil {
-						log.Printf("[WARN] mdns: Failed to set multicast interface: %v", err)
+						return fmt.Errorf("failed to set multicast interface: %w", err)
 					}
 				}
 				if _, err := s.ipv4conn.WriteTo(buf, &wcm, ipv4Addr); err != nil {
@@ -802,7 +823,7 @@ func (s *Server) multicastResponse(msg *dns.Msg, ifIndex int) error {
 			default:
 				iface, _ := net.InterfaceByIndex(ifIndex)
 				if err := s.ipv6conn.SetMulticastInterface(iface); err != nil {
-					log.Printf("[WARN] mdns: Failed to set multicast interface: %v", err)
+					return fmt.Errorf("failed to set multicast interface: %w", err)
 				}
 			}
 			if _, err := s.ipv6conn.WriteTo(buf, &wcm, ipv6Addr); err != nil {
@@ -815,7 +836,7 @@ func (s *Server) multicastResponse(msg *dns.Msg, ifIndex int) error {
 					wcm.IfIndex = intf.Index
 				default:
 					if err := s.ipv6conn.SetMulticastInterface(&intf); err != nil {
-						log.Printf("[WARN] mdns: Failed to set multicast interface: %v", err)
+						return fmt.Errorf("failed to set multicast interface: %w", err)
 					}
 				}
 				if _, err := s.ipv6conn.WriteTo(buf, &wcm, ipv6Addr); err != nil {
