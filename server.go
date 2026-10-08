@@ -276,8 +276,9 @@ func (s *Server) SetText(text []string) {
 				return
 			}
 		} else {
+			// Restart with the new data without shortening a pending
+			// startup delay or conflict retry.
 			state.sent = 0
-			state.next = time.Now()
 		}
 	}
 	s.notifyProbe()

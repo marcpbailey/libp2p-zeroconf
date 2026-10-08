@@ -16,7 +16,8 @@ registration uses that interface's addresses; proxy registration keeps its
 explicit address data. A terminal failure on one required interface stops the
 whole registration and withdraws records already established on other links.
 During reprobes the affected interface suppresses responses
-and TXT announcements. Text updates during initial probing restart that sequence.
+and TXT announcements. Text updates during initial probing restart that sequence without shortening
+a pending startup delay or conflict retry.
 
 Windows currently lacks receive-interface metadata in the pinned x/net version.
 Registration therefore requires one explicitly selected interface there, rather

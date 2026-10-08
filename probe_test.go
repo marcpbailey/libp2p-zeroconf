@@ -520,3 +520,29 @@ func TestShutdownDuringTiebreakRetry(t *testing.T) {
 		t.Fatal("canceled retry did not release initial readiness wait")
 	}
 }
+
+func TestTextUpdatePreservesConflictRetryDelay(t *testing.T) {
+	for _, conflicts := range []int{1, 15} {
+		t.Run(fmt.Sprintf("conflicts-%d", conflicts), func(t *testing.T) {
+			s, packets := protocolServer(t)
+			p := s.probes[1]
+			now := time.Now().Add(time.Minute)
+			for n := 0; n < conflicts; n++ {
+				p.restart(now, time.Second)
+			}
+			retry := p.next
+			s.SetText([]string{"v=2"})
+			if !p.next.Equal(retry) {
+				t.Fatalf("TXT update shortened conflict retry: got %v, want %v", p.next, retry)
+			}
+			s.stepProbes(retry.Add(-time.Nanosecond))
+			if len(*packets) != 0 {
+				t.Fatal("TXT update sent a probe before the conflict delay expired")
+			}
+			s.stepProbes(retry)
+			if len(*packets) != 1 {
+				t.Fatal("retry did not resume at its scheduled time")
+			}
+		})
+	}
+}
