@@ -233,7 +233,7 @@ func TestMain(m *testing.M) {
 	if os.Getenv("ZEROCONF_INTEROP_INTERFACE") != "" {
 		flag.Parse()
 		run := flag.Lookup("test.run").Value.String()
-		if run != "^TestNativeInterop$" && run != "^TestBonjourRemotePeer$" {
+		if run != "^TestNativeInterop$" && run != "^TestBonjourRemotePeer$" && run != "^TestBonjourDefenceTiming$" {
 			fmt.Fprintln(os.Stderr, "interop requires an exact test name; refusing default tests on native mDNS")
 			os.Exit(2)
 		}

@@ -197,10 +197,16 @@ func (s *Server) stepProbes(now time.Time) time.Duration {
 	if s.isShutdown {
 		return delay
 	}
+	probeCount := 3
+	// A shared port cannot reliably receive unicast defence. Multicast
+	// defence may arrive late, so send the final probe a second after the first.
+	if !s.unicastProbes {
+		probeCount = 5
+	}
 	for index, p := range s.probes {
 		if !p.next.IsZero() && !now.Before(p.next) {
 			if !p.established {
-				if p.sent < 3 {
+				if p.sent < probeCount {
 					if err := s.sendMulticast(s.probeMessage(index), index); err != nil {
 						s.stopLocked(err)
 						return delay

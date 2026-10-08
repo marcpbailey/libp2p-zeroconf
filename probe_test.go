@@ -546,3 +546,42 @@ func TestTextUpdatePreservesConflictRetryDelay(t *testing.T) {
 		})
 	}
 }
+
+func TestSharedPortProbeWaitsForDelayedDefence(t *testing.T) {
+	s, packets := protocolServer(t)
+	s.unicastProbes = false
+	start := time.Unix(1, 0)
+	for n := 0; n < 5; n++ {
+		s.stepProbes(start.Add(time.Duration(n) * 250 * time.Millisecond))
+		if s.probes[1].established || (*packets)[n].Response {
+			t.Fatal("shared-port registration announced before delayed defence window")
+		}
+	}
+	err := s.observeResponse(response(conflicting(s)), 1, s.probes[1], start.Add(1001*time.Millisecond))
+	if err == nil {
+		t.Fatal("delayed native defence did not prevent false readiness")
+	}
+	if s.WaitForReady(context.Background()) == nil {
+		t.Fatal("delayed conflict reported successful readiness")
+	}
+}
+
+func TestSharedPortProbeCompletesWithoutDefence(t *testing.T) {
+	s, packets := protocolServer(t)
+	s.unicastProbes = false
+	start := time.Unix(1, 0)
+	for n := 0; n < 5; n++ {
+		s.stepProbes(start.Add(time.Duration(n) * 250 * time.Millisecond))
+	}
+	s.stepProbes(start.Add(1249 * time.Millisecond))
+	if len(*packets) != 5 || s.probes[1].established {
+		t.Fatal("shared-port registration ended probing too early")
+	}
+	s.stepProbes(start.Add(1250 * time.Millisecond))
+	if len(*packets) != 6 || !(*packets)[5].Response {
+		t.Fatal("shared-port registration did not announce after extended probing")
+	}
+	if err := s.WaitForReady(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}

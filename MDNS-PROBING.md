@@ -20,8 +20,10 @@ and TXT announcements. Text updates during initial probing restart that sequence
 a pending startup delay or conflict retry.
 
 Windows currently lacks receive-interface metadata in the pinned x/net version.
-Registration therefore requires one explicitly selected interface there, rather
-than treating packets from an unknown interface as evidence for every link.
+The current draft rejects multiple-interface registration there. This restriction
+is not approved and remains under investigation. Windows exposes packet
+information natively, and Go 1.21 supports receiving its control data through
+UDPConn.ReadMsgUDP; preserving multiple-interface support is the intended result.
 Socket/packet errors are reported through the lifecycle API. A family with no
 usable interface address is not opened.
 
@@ -37,7 +39,7 @@ The normative reference is [RFC 6762](https://www.rfc-editor.org/rfc/rfc6762.htm
 
 | Section | Implementation |
 | --- | --- |
-| 8.1 | Probe unique names with ANY questions and proposed data; delay startup and space three probes by 250 ms. |
+| 8.1 | Probe unique names with ANY questions and proposed data; delay startup and space probes by 250 ms. Use three with unicast defence, five when sharing the port. |
 | 8.2 | Match authority records to question name/class/type, sort class/type/uncompressed RDATA, remove duplicates, and compare complete lists; the loser waits one second. |
 | 8.1 | Fifteen conflicts within ten seconds impose at least five seconds between further attempts. |
 | 9 | Established conflicts return to probing; a subsequent loss ends registration. |
@@ -60,14 +62,26 @@ Controlled tests use Avahi 0.8 (Debian package 0.8-10+deb12u1) and Bonjour
 announcements stop, withdrawal, and collision with an established native service.
 The collision phase allows the native startup announcement sequence to finish.
 
-An additional Bonjour experiment starting the library during the native startup
-announcements did not receive a defending response. Its three probes were all
-within one second of the last native announcement. The examined Bonjour source
-at [revision 641cdf73ef46e1824895cbc44ad8ac7647da2479](https://github.com/apple-oss-distributions/mDNSResponder/blob/641cdf73ef46e1824895cbc44ad8ac7647da2479/mDNSCore/mDNS.c)
-limits multicast query responses based on LastMCTime in ProcessQuery. That source
-revision is 2881.120.11, not the exact installed daemon. It supports a rate-limit
-explanation for the observation but does not establish the installed daemon's
-internal cause. The earlier experiment remains a recorded compatibility failure.
-RFC 6762 section 8.1 requires ignoring conflicts received before the first probe;
-this implementation does not use a cached native announcement as a substitute
-for a live defensive response.
+The original same-host collision experiment failed when library probing started
+during Bonjour startup announcements. A controlled diagnostic then sent three
+multicast-only probes immediately after an observed native announcement. In three
+runs there was no defence within 750 ms; a legacy unicast query also timed out
+before one second. The same multicast probe was answered about 2.1 seconds after
+the announcement. This is direct evidence of a response timing gap, not proof of
+the installed daemon's internal cause.
+
+When the port is shared and unicast defence cannot be received reliably, the
+library now sends two further multicast probes, still 250 ms apart. It stays
+tentative until 250 ms after the fifth probe. This adds 500 ms to establishment,
+and rejected the original two-second-start Bonjour collision in three runs.
+The unicast-capable path retains the usual three probes. Register and
+RegisterProxy remain nonblocking; no cached announcement is used as conflict
+proof. Startup delay, simultaneous-probe retry and excessive-conflict delays are
+unchanged.
+
+RFC 6762 section 8.1 permits announcing after the third probe; it does not require
+immediate announcement. The additional multicast-only probes are an intentional
+compatibility mitigation, not an RFC requirement. Packet format, probe spacing,
+tentative-state restrictions, and deferral to live conflicting responses apply
+throughout the extended sequence. Native Windows validation and broader Windows
+transport work are still incomplete.

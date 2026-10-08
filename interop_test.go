@@ -116,9 +116,9 @@ func TestNativeInterop(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { publisher.Process.Kill(); publisher.Wait() })
-	// Allow the native startup announcement sequence to complete before
-	// exercising defence by an established responder.
-	time.Sleep(5 * time.Second)
+	// Start during the native announcement sequence to exercise the
+	// collision timing that previously reported false readiness.
+	time.Sleep(2 * time.Second)
 	collision, err := RegisterProxy(instance, typ, "local", 9002, instance+".local.", []string{"192.0.2.30"}, []string{"tv410=3"}, []net.Interface{*iface})
 	if err != nil {
 		t.Fatal(err)
