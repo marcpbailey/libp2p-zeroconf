@@ -81,6 +81,10 @@ func TestNativeInterop(t *testing.T) {
 		t.Fatalf("native browse missed registration: %s", out.String())
 	}
 	t.Logf("native browse saw registration: %s", out.String())
+	// Query after the unsolicited announcements have finished. A native
+	// browser seeing cached data alone does not prove continued response.
+	time.Sleep(2 * time.Second)
+	checkInteropResponse(t, iface, own.service.ServiceInstanceName(), own.service.Port)
 	own.Shutdown()
 	marker := "Rmv"
 	if runtime.GOOS != "darwin" {
@@ -112,7 +116,9 @@ func TestNativeInterop(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { publisher.Process.Kill(); publisher.Wait() })
-	time.Sleep(2 * time.Second)
+	// Allow the native startup announcement sequence to complete before
+	// exercising defence by an established responder.
+	time.Sleep(5 * time.Second)
 	collision, err := RegisterProxy(instance, typ, "local", 9002, instance+".local.", []string{"192.0.2.30"}, []string{"tv410=3"}, []net.Interface{*iface})
 	if err != nil {
 		t.Fatal(err)
@@ -126,6 +132,49 @@ func TestNativeInterop(t *testing.T) {
 		t.Fatalf("expected native collision: %v; publisher: %s", err, pubOut.String())
 	}
 	t.Logf("native collision: %v; publisher: %s", err, pubOut.String())
+}
+
+// Verify a fresh multicast query is answered after startup announcements stop.
+func checkInteropResponse(t *testing.T, iface *net.Interface, name string, port int) {
+	t.Helper()
+	conn, err := net.ListenMulticastUDP("udp4", iface, &net.UDPAddr{IP: mdnsGroupIPv4, Port: mdnsWildcardAddrIPv4.Port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	packets := ipv4.NewPacketConn(conn)
+	if err := packets.SetMulticastLoopback(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := packets.SetMulticastTTL(255); err != nil {
+		t.Fatal(err)
+	}
+	query := &dns.Msg{Question: []dns.Question{{Name: name, Qtype: dns.TypeSRV, Qclass: dns.ClassINET}}}
+	wire, err := query.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := packets.WriteTo(wire, &ipv4.ControlMessage{IfIndex: iface.Index}, ipv4Addr); err != nil {
+		t.Fatal(err)
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 65536)
+	for {
+		n, _, source, err := packets.ReadFrom(buf)
+		if err != nil {
+			t.Fatalf("no continued response to SRV query: %v", err)
+		}
+		var response dns.Msg
+		if response.Unpack(buf[:n]) != nil || !response.Response {
+			continue
+		}
+		for _, rr := range response.Answer {
+			if srv, ok := rr.(*dns.SRV); ok && sameMDNSName(srv.Hdr.Name, name) && srv.Port == uint16(port) && srv.Hdr.Ttl > 0 {
+				t.Logf("continued SRV response from %s: %s", source, srv.String())
+				return
+			}
+		}
+	}
 }
 
 type lockedBuffer struct {
