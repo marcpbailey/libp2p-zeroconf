@@ -3,10 +3,14 @@ package zeroconf
 import (
 	"fmt"
 	"net"
+	"sync"
 
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )
+
+// Serialize socket creation with the temporary exclusive bind used for QU detection.
+var multicastSocketMu sync.Mutex
 
 var (
 	// Multicast groups used by mDNS
@@ -36,6 +40,12 @@ var (
 )
 
 func joinUdp6Multicast(interfaces []net.Interface, requireAll ...bool) (*ipv6.PacketConn, error) {
+	multicastSocketMu.Lock()
+	defer multicastSocketMu.Unlock()
+	return joinUdp6MulticastLocked(interfaces, requireAll...)
+}
+
+func joinUdp6MulticastLocked(interfaces []net.Interface, requireAll ...bool) (*ipv6.PacketConn, error) {
 	var udpConn *net.UDPConn
 	var err error
 	firstJoined := false
@@ -80,6 +90,12 @@ func joinUdp6Multicast(interfaces []net.Interface, requireAll ...bool) (*ipv6.Pa
 }
 
 func joinUdp4Multicast(interfaces []net.Interface, requireAll ...bool) (*ipv4.PacketConn, error) {
+	multicastSocketMu.Lock()
+	defer multicastSocketMu.Unlock()
+	return joinUdp4MulticastLocked(interfaces, requireAll...)
+}
+
+func joinUdp4MulticastLocked(interfaces []net.Interface, requireAll ...bool) (*ipv4.PacketConn, error) {
 	var udpConn *net.UDPConn
 	var err error
 	firstJoined := false

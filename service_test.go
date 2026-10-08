@@ -293,3 +293,34 @@ func TestBrowseDoesNotEmitTentativeProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Socket creation must not race the exclusive bind used to choose QU probes.
+func TestConcurrentServerAndClientSockets(t *testing.T) {
+	ifaces := testMulticastIfaces(t)
+	for attempt := 0; attempt < 100; attempt++ {
+		start := make(chan struct{})
+		servers := make(chan error, 1)
+		clients := make(chan error, 1)
+		go func() {
+			<-start
+			s, err := newServer(ifaces, applyServerOpts())
+			if s != nil {
+				s.Shutdown()
+			}
+			servers <- err
+		}()
+		go func() {
+			<-start
+			c, err := newClient(applyOpts(SelectIfaces(ifaces), SelectIPTraffic(IPv4)))
+			if c != nil {
+				c.shutdown()
+			}
+			clients <- err
+		}()
+		close(start)
+		serverErr, clientErr := <-servers, <-clients
+		if serverErr != nil || clientErr != nil {
+			t.Fatalf("attempt %d: server: %v; client: %v", attempt, serverErr, clientErr)
+		}
+	}
+}

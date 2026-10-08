@@ -149,6 +149,7 @@ func (s *Server) proposedRecords(index int) []dns.RR {
 // RFC 6762 section 15.1: on a host with another mDNS implementation,
 // unicast replies may go exclusively to the first socket bound to port 5353.
 // Ask for multicast defence unless this process can bind the port exclusively.
+// The caller holds multicastSocketMu until its multicast sockets are open.
 func canReceiveUnicastProbes() bool {
 	c4, err := net.ListenUDP("udp4", &net.UDPAddr{Port: mdnsWildcardAddrIPv4.Port})
 	if err != nil {
