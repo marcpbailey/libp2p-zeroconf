@@ -381,6 +381,8 @@ func (s *Server) observeProbe(msg *dns.Msg, index int, p *interfaceProbe, now ti
 
 func (s *Server) observeResponse(msg *dns.Msg, index int, p *interfaceProbe, now time.Time) error {
 	proposed := s.proposedRecords(index)
+	var advertised dns.Msg
+	s.composeLookupAnswers(&advertised, s.ttl, index, true)
 	all := append(append(append([]dns.RR{}, msg.Answer...), msg.Ns...), msg.Extra...)
 	refresh := false
 	for _, remote := range all {
@@ -405,10 +407,16 @@ func (s *Server) observeResponse(msg *dns.Msg, index int, p *interfaceProbe, now
 				break
 			}
 		}
+		if !identical {
+			for _, own := range advertised.Answer {
+				if identicalRecord(own, remote) {
+					identical = true
+					break
+				}
+			}
+		}
 		if h.Ttl == 0 {
 			if p.established {
-				var advertised dns.Msg
-				s.composeLookupAnswers(&advertised, s.ttl, index, true)
 				for _, own := range advertised.Answer {
 					if identicalRecord(own, remote) {
 						refresh = true

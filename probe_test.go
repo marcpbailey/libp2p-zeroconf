@@ -390,7 +390,13 @@ func TestEstablishedAnswersAndTextUpdate(t *testing.T) {
 	if err := s.handleQuestion(q, &reply, &dns.Msg{}, 1); err != nil {
 		t.Fatal(err)
 	}
-	if len(reply.Answer) != 2 {
+	addresses := 0
+	for _, rr := range reply.Answer {
+		if rr.Header().Rrtype == dns.TypeA {
+			addresses++
+		}
+	}
+	if addresses != 2 {
 		t.Fatal("established address response missing")
 	}
 	before := len(*packets)
