@@ -198,6 +198,10 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 			}
 			continue
 		case msg := <-msgCh:
+			// Probe authority and query known-answer records are not established answers.
+			if !msg.Response {
+				continue
+			}
 			now = time.Now()
 			entries = make(map[string]*ServiceEntry)
 			sections := append(msg.Answer, msg.Ns...)
