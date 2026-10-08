@@ -2,7 +2,11 @@ package zeroconf
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log"
+	"net"
+	"os"
 	"testing"
 	"time"
 )
@@ -17,7 +21,7 @@ var (
 
 func startMDNS(t *testing.T, port int, name, service, domain string) {
 	// 5353 is default mdns port
-	server, err := Register(name, service, domain, port, []string{"txtv=0", "lo=1", "la=2"}, nil)
+	server, err := registerTestService(t, name, service, domain, port, []string{"txtv=0", "lo=1", "la=2"})
 	if err != nil {
 		t.Fatalf("error while registering mdns service: %s", err)
 	}
@@ -26,7 +30,7 @@ func startMDNS(t *testing.T, port int, name, service, domain string) {
 }
 
 func TestQuickShutdown(t *testing.T) {
-	server, err := Register(mdnsName, mdnsService, mdnsDomain, mdnsPort, []string{"txtv=0", "lo=1", "la=2"}, nil)
+	server, err := registerTestService(t, mdnsName, mdnsService, mdnsDomain, mdnsPort, []string{"txtv=0", "lo=1", "la=2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +56,7 @@ func TestBasic(t *testing.T) {
 	time.Sleep(time.Second)
 
 	entries := make(chan *ServiceEntry, 100)
-	if err := Browse(ctx, mdnsService, mdnsDomain, entries); err != nil {
+	if err := Browse(ctx, mdnsService, mdnsDomain, entries, SelectIfaces(testMulticastIfaces(t)), SelectIPTraffic(IPv4)); err != nil {
 		t.Fatalf("Expected browse success, but got %v", err)
 	}
 	<-ctx.Done()
@@ -86,7 +90,7 @@ func TestNoRegister(t *testing.T) {
 	}(entries)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := Browse(ctx, mdnsService, mdnsDomain, entries); err != nil {
+	if err := Browse(ctx, mdnsService, mdnsDomain, entries, SelectIfaces(testMulticastIfaces(t)), SelectIPTraffic(IPv4)); err != nil {
 		t.Fatalf("Expected browse success, but got %v", err)
 	}
 	<-ctx.Done()
@@ -103,7 +107,7 @@ func TestSubtype(t *testing.T) {
 		time.Sleep(time.Second)
 
 		entries := make(chan *ServiceEntry, 100)
-		if err := Browse(ctx, mdnsSubtype, mdnsDomain, entries); err != nil {
+		if err := Browse(ctx, mdnsSubtype, mdnsDomain, entries, SelectIfaces(testMulticastIfaces(t)), SelectIPTraffic(IPv4)); err != nil {
 			t.Fatalf("Expected browse success, but got %v", err)
 		}
 		<-ctx.Done()
@@ -135,7 +139,7 @@ func TestSubtype(t *testing.T) {
 		time.Sleep(time.Second)
 
 		entries := make(chan *ServiceEntry, 100)
-		if err := Browse(ctx, mdnsService, mdnsDomain, entries); err != nil {
+		if err := Browse(ctx, mdnsService, mdnsDomain, entries, SelectIfaces(testMulticastIfaces(t)), SelectIPTraffic(IPv4)); err != nil {
 			t.Fatalf("Expected browse success, but got %v", err)
 		}
 		<-ctx.Done()
@@ -176,7 +180,7 @@ func TestSubtype(t *testing.T) {
 		startMDNS(t, mdnsPort, mdnsName, mdnsSubtype, mdnsDomain)
 
 		entries := make(chan *ServiceEntry, 100)
-		if err := Browse(ctx, mdnsService, mdnsDomain, entries); err != nil {
+		if err := Browse(ctx, mdnsService, mdnsDomain, entries, SelectIfaces(testMulticastIfaces(t)), SelectIPTraffic(IPv4)); err != nil {
 			t.Fatalf("Expected browse success, but got %v", err)
 		}
 
@@ -190,4 +194,63 @@ func TestSubtype(t *testing.T) {
 			t.Fatalf("expected the two entries to be identical")
 		}
 	})
+}
+
+// Multicast integration tests use private groups and a test port on one
+// interface, and never claim the computer's hostname.
+func testMulticastIfaces(t *testing.T) []net.Interface {
+	t.Helper()
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagLoopback == 0 && iface.Flags&net.FlagUp != 0 && iface.Flags&net.FlagMulticast != 0 {
+			addresses, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, address := range addresses {
+				if ipnet, ok := address.(*net.IPNet); ok && ipnet.IP.To4() != nil && ipnet.IP.IsGlobalUnicast() {
+					return []net.Interface{iface}
+				}
+			}
+		}
+	}
+	t.Skip("no active IPv4 multicast interface")
+	return nil
+}
+
+func registerTestService(t *testing.T, instance, service, domain string, port int, text []string) (*Server, error) {
+	t.Helper()
+	host := fmt.Sprintf("zeroconf-test-%d-%d.local.", os.Getpid(), time.Now().UnixNano())
+	return RegisterProxy(instance, service, domain, port, host, []string{"127.0.0.1"}, text, testMulticastIfaces(t))
+}
+
+// Use private test destinations and multicast bindings, never the system mDNS
+// port or multicast groups. The protocol processing remains unchanged.
+func TestMain(m *testing.M) {
+	if os.Getenv("ZEROCONF_INTEROP_INTERFACE") != "" {
+		flag.Parse()
+		run := flag.Lookup("test.run").Value.String()
+		if run != "^TestNativeInterop$" && run != "^TestBonjourRemotePeer$" {
+			fmt.Fprintln(os.Stderr, "interop requires an exact test name; refusing default tests on native mDNS")
+			os.Exit(2)
+		}
+		os.Exit(m.Run())
+	}
+	listener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	port := listener.LocalAddr().(*net.UDPAddr).Port
+	listener.Close()
+	mdnsGroupIPv4 = net.ParseIP("239.255.42.33")
+	mdnsGroupIPv6 = net.ParseIP("ff02::114")
+	mdnsWildcardAddrIPv4 = &net.UDPAddr{IP: mdnsGroupIPv4, Port: port}
+	mdnsWildcardAddrIPv6 = &net.UDPAddr{IP: net.ParseIP("ff02::"), Port: port}
+	ipv4Addr = &net.UDPAddr{IP: mdnsGroupIPv4, Port: port}
+	ipv6Addr = &net.UDPAddr{IP: mdnsGroupIPv6, Port: port}
+	os.Exit(m.Run())
 }
