@@ -13,18 +13,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            go: '1.21.x'
+          - os: macos-latest
+            go: '1.26.x'
+          - os: windows-latest
+            go: '1.21.x'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.21.x'
+          go-version: ${{ matrix.go }}
       - name: Test native resolver and controlled DNS server
-        shell: bash
-        run: |
-          flags=()
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            flags=(-ldflags=-linkmode=external)
-          fi
-          go test "${flags[@]}" ./... -run 'TestUnicast|TestDNSNegative|TestDarwinResolver|TestSystemResolver|TestResolverAddresses|TestProxy|TestRefreshCachedEntry|TestUnannouncementsOption' -count=1 -timeout 60s
+        run: go test ./... -run 'TestUnicast|TestDNSNegative|TestDarwinResolver|TestSystemResolver|TestResolverAddresses|TestProxy|TestRefreshCachedEntry|TestUnannouncementsOption' -count=1 -timeout 60s
