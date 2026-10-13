@@ -85,11 +85,8 @@ func Register(instance, service, domain string, port int, text []string, ifaces 
 		ifaces = listMulticastInterfaces()
 	}
 
-	for _, iface := range ifaces {
-		v4, v6 := addrsForInterface(&iface)
-		entry.AddrIPv4 = append(entry.AddrIPv4, v4...)
-		entry.AddrIPv6 = append(entry.AddrIPv6, v6...)
-	}
+	var addresses map[int][]net.IP
+	entry.AddrIPv4, entry.AddrIPv6, addresses = addressesForInterfaces(ifaces)
 
 	if entry.AddrIPv4 == nil && entry.AddrIPv6 == nil {
 		return nil, fmt.Errorf("could not determine host IP addresses")
@@ -101,11 +98,7 @@ func Register(instance, service, domain string, port int, text []string, ifaces 
 	}
 
 	s.service = entry
-	s.interfaceAddrs = make(map[int][]net.IP)
-	for _, iface := range ifaces {
-		v4, v6 := addrsForInterface(&iface)
-		s.interfaceAddrs[iface.Index] = append(v4, v6...)
-	}
+	s.interfaceAddrs = addresses
 	s.start()
 
 	return s, nil
@@ -174,6 +167,7 @@ const (
 // Server structure encapsulates both IPv4/IPv6 UDP connections
 type Server struct {
 	service    *ServiceEntry
+	hostname   *hostnameRegistration
 	ipv4conn   *ipv4.PacketConn
 	ipv6conn   *ipv6.PacketConn
 	ifaces     []net.Interface
@@ -317,7 +311,7 @@ func (s *Server) start() {
 func (s *Server) SetText(text []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.isShutdown {
+	if s.isShutdown || s.service == nil {
 		return
 	}
 	s.service.Text = append([]string(nil), text...)
@@ -540,7 +534,8 @@ func isKnownAnswer(resp *dns.Msg, query *dns.Msg) bool {
 
 // handleQuestion is used to handle an incoming question
 func (s *Server) handleQuestion(q dns.Question, resp *dns.Msg, query *dns.Msg, ifIndex int) error {
-	if s.service == nil {
+	host := s.hostnameData()
+	if host.name == "" {
 		return nil
 	}
 
@@ -551,12 +546,15 @@ func (s *Server) handleQuestion(q dns.Question, resp *dns.Msg, query *dns.Msg, i
 	if q.Qclass & ^qClassCacheFlush != dns.ClassINET && q.Qclass & ^qClassCacheFlush != dns.ClassANY {
 		return nil
 	}
-	if sameMDNSName(q.Name, s.service.HostName) {
+	if sameMDNSName(q.Name, host.name) {
 		for _, rr := range s.appendAddrs(nil, s.ttl, ifIndex, true) {
-			if q.Qtype == dns.TypeANY || q.Qtype == rr.Header().Rrtype {
+			if q.Qtype == dns.TypeANY || q.Qtype == rr.Header().Rrtype || rr.Header().Rrtype == dns.TypeNSEC {
 				resp.Answer = append(resp.Answer, rr)
 			}
 		}
+		return nil
+	}
+	if s.service == nil {
 		return nil
 	}
 
@@ -631,6 +629,10 @@ func (s *Server) composeBrowsingAnswers(resp *dns.Msg, ifIndex int) {
 }
 
 func (s *Server) composeLookupAnswers(resp *dns.Msg, ttl uint32, ifIndex int, flushCache bool) {
+	if s.service == nil {
+		resp.Answer = s.appendAddrs(resp.Answer, ttl, ifIndex, flushCache)
+		return
+	}
 	// From RFC6762
 	//    The most significant bit of the rrclass for a record in the Answer
 	//    Section of a response message is the Multicast DNS cache-flush bit
@@ -715,8 +717,9 @@ func (s *Server) serviceTypeName(resp *dns.Msg, ttl uint32) {
 }
 
 func (s *Server) appendAddrs(list []dns.RR, ttl uint32, ifIndex int, flushCache bool) []dns.RR {
-	v4 := s.service.AddrIPv4
-	v6 := s.service.AddrIPv6
+	host := s.hostnameData()
+	v4 := host.v4
+	v6 := host.v6
 	if s.interfaceAddrs != nil {
 		v4, v6 = nil, nil
 		for _, ip := range s.interfaceAddrs[ifIndex] {
@@ -748,7 +751,7 @@ func (s *Server) appendAddrs(list []dns.RR, ttl uint32, ifIndex int, flushCache 
 	for _, ipv4 := range v4 {
 		a := &dns.A{
 			Hdr: dns.RR_Header{
-				Name:   s.service.HostName,
+				Name:   host.name,
 				Rrtype: dns.TypeA,
 				Class:  dns.ClassINET | cacheFlushBit,
 				Ttl:    ttl,
@@ -760,7 +763,7 @@ func (s *Server) appendAddrs(list []dns.RR, ttl uint32, ifIndex int, flushCache 
 	for _, ipv6 := range v6 {
 		aaaa := &dns.AAAA{
 			Hdr: dns.RR_Header{
-				Name:   s.service.HostName,
+				Name:   host.name,
 				Rrtype: dns.TypeAAAA,
 				Class:  dns.ClassINET | cacheFlushBit,
 				Ttl:    ttl,
@@ -768,6 +771,16 @@ func (s *Server) appendAddrs(list []dns.RR, ttl uint32, ifIndex int, flushCache 
 			AAAA: ipv6,
 		}
 		list = append(list, aaaa)
+	}
+	if s.hostname != nil && (len(v4) == 0 || len(v6) == 0) && len(v4)+len(v6) > 0 {
+		types := []uint16{dns.TypeA}
+		if len(v4) == 0 {
+			types = []uint16{dns.TypeAAAA}
+		}
+		list = append(list, &dns.NSEC{
+			Hdr:        dns.RR_Header{Name: host.name, Rrtype: dns.TypeNSEC, Class: dns.ClassINET | cacheFlushBit, Ttl: ttl},
+			NextDomain: host.name, TypeBitMap: types,
+		})
 	}
 	return list
 }
