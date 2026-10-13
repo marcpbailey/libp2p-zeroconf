@@ -632,6 +632,11 @@ func (s *Server) composeBrowsingAnswers(resp *dns.Msg, ifIndex int) {
 }
 
 func (s *Server) composeLookupAnswers(resp *dns.Msg, ttl uint32, ifIndex int, flushCache bool) {
+	if s.service == nil {
+		resp.Answer = s.appendAddrs(resp.Answer, ttl, ifIndex, flushCache)
+		return
+	}
+
 	// From RFC6762
 	//    The most significant bit of the rrclass for a record in the Answer
 	//    Section of a response message is the Multicast DNS cache-flush bit
