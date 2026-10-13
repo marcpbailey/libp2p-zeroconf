@@ -16,5 +16,15 @@ concurrency:
 jobs:
   go-test:
     uses: ipdxco/unified-github-workflows/.github/workflows/go-test.yml@v1.0
+    with:
+      os-versions: '["ubuntu", "windows"]'
+      go-versions: '["this", "next"]'
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+  go-test-macos:
+    uses: ipdxco/unified-github-workflows/.github/workflows/go-test.yml@v1.0
+    with:
+      os-versions: '["macos"]'
+      go-versions: '["1.26.x"]'
     secrets:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
