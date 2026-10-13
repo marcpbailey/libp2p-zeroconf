@@ -53,11 +53,13 @@ func windowsPacketInterface(control []byte, wordSize int, ipv6 bool) (int, error
 	return index, nil
 }
 
-func windowsPacketControl(index, wordSize int, ipv6 bool) []byte {
+func windowsPacketControl(index, wordSize int, ipv6 bool, source net.IP) []byte {
 	header := wordSize + 8
 	level, addressSize := uint32(0), 4
+	address := source.To4()
 	if ipv6 {
 		level, addressSize = 41, 16
+		address = source.To16()
 	}
 	length := header + addressSize + 4
 	control := make([]byte, (length+wordSize-1) & ^(wordSize-1))
@@ -68,6 +70,7 @@ func windowsPacketControl(index, wordSize int, ipv6 bool) []byte {
 	}
 	binary.LittleEndian.PutUint32(control[wordSize:], level)
 	binary.LittleEndian.PutUint32(control[wordSize+4:], 19)
+	copy(control[header:header+addressSize], address)
 	binary.LittleEndian.PutUint32(control[header+addressSize:], uint32(index))
 	return control
 }

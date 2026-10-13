@@ -38,20 +38,21 @@ func TestWindowsPacketInterfaceABI(t *testing.T) {
 
 func TestWindowsOutgoingPacketControlABI(t *testing.T) {
 	for _, test := range []struct {
-		word int
-		ipv6 bool
-		wire string
+		word   int
+		ipv6   bool
+		source net.IP
+		wire   string
 	}{
-		{4, false, "1400000000000000130000000000000004000000"},
-		{8, false, "180000000000000000000000130000000000000004000000"},
-		{4, true, "2000000029000000130000000000000000000000000000000000000004000000"},
-		{8, true, "24000000000000002900000013000000000000000000000000000000000000000400000000000000"},
+		{4, false, net.ParseIP("192.0.2.10"), "140000000000000013000000c000020a04000000"},
+		{8, false, net.ParseIP("192.0.2.10"), "18000000000000000000000013000000c000020a04000000"},
+		{4, true, net.ParseIP("2001:db8::10"), "20000000290000001300000020010db800000000000000000000001004000000"},
+		{8, true, net.ParseIP("2001:db8::10"), "2400000000000000290000001300000020010db80000000000000000000000100400000000000000"},
 	} {
 		expected, err := hex.DecodeString(test.wire)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := windowsPacketControl(4, test.word, test.ipv6); !bytes.Equal(got, expected) {
+		if got := windowsPacketControl(4, test.word, test.ipv6, test.source); !bytes.Equal(got, expected) {
 			t.Fatalf("word=%d ipv6=%v: got %x want %x", test.word, test.ipv6, got, expected)
 		}
 	}
