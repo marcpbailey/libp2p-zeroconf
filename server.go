@@ -552,11 +552,7 @@ func (s *Server) handleQuestion(q dns.Question, resp *dns.Msg, query *dns.Msg, i
 		return nil
 	}
 	if sameMDNSName(q.Name, s.service.HostName) {
-		for _, rr := range s.appendAddrs(nil, s.ttl, ifIndex, true) {
-			if q.Qtype == dns.TypeANY || q.Qtype == rr.Header().Rrtype {
-				resp.Answer = append(resp.Answer, rr)
-			}
-		}
+		resp.Answer = s.appendAddrsForType(resp.Answer, s.ttl, ifIndex, true, q.Qtype)
 		return nil
 	}
 
@@ -715,6 +711,10 @@ func (s *Server) serviceTypeName(resp *dns.Msg, ttl uint32) {
 }
 
 func (s *Server) appendAddrs(list []dns.RR, ttl uint32, ifIndex int, flushCache bool) []dns.RR {
+	return s.appendAddrsForType(list, ttl, ifIndex, flushCache, dns.TypeANY)
+}
+
+func (s *Server) appendAddrsForType(list []dns.RR, ttl uint32, ifIndex int, flushCache bool, qtype uint16) []dns.RR {
 	v4 := s.service.AddrIPv4
 	v6 := s.service.AddrIPv6
 	if s.interfaceAddrs != nil {
@@ -736,40 +736,49 @@ func (s *Server) appendAddrs(list []dns.RR, ttl uint32, ifIndex int, flushCache 
 		}
 	}
 	if ttl > 0 {
-		// RFC6762 Section 10 says A/AAAA records SHOULD
-		// use TTL of 120s, to account for network interface
-		// and IP address changes.
+		// RFC6762 Section 10 recommends 120s for A/AAAA records so they
+		// account for network interface and address changes.
 		ttl = 120
 	}
 	var cacheFlushBit uint16
 	if flushCache {
 		cacheFlushBit = qClassCacheFlush
 	}
-	for _, ipv4 := range v4 {
-		a := &dns.A{
-			Hdr: dns.RR_Header{
-				Name:   s.service.HostName,
-				Rrtype: dns.TypeA,
-				Class:  dns.ClassINET | cacheFlushBit,
-				Ttl:    ttl,
-			},
-			A: ipv4,
+	if qtype == dns.TypeA || qtype == dns.TypeANY {
+		for _, ip := range v4 {
+			list = append(list, &dns.A{
+				Hdr: dns.RR_Header{Name: s.service.HostName, Rrtype: dns.TypeA, Class: dns.ClassINET | cacheFlushBit, Ttl: ttl},
+				A:   ip,
+			})
 		}
-		list = append(list, a)
 	}
-	for _, ipv6 := range v6 {
-		aaaa := &dns.AAAA{
-			Hdr: dns.RR_Header{
-				Name:   s.service.HostName,
-				Rrtype: dns.TypeAAAA,
-				Class:  dns.ClassINET | cacheFlushBit,
-				Ttl:    ttl,
-			},
-			AAAA: ipv6,
+	if qtype == dns.TypeAAAA || qtype == dns.TypeANY {
+		for _, ip := range v6 {
+			list = append(list, &dns.AAAA{
+				Hdr:  dns.RR_Header{Name: s.service.HostName, Rrtype: dns.TypeAAAA, Class: dns.ClassINET | cacheFlushBit, Ttl: ttl},
+				AAAA: ip,
+			})
 		}
-		list = append(list, aaaa)
+	}
+	if len(v4)+len(v6) > 0 && (len(v4) == 0 || len(v6) == 0) {
+		list = append(list, &dns.NSEC{
+			Hdr:        dns.RR_Header{Name: s.service.HostName, Rrtype: dns.TypeNSEC, Class: dns.ClassINET | cacheFlushBit, Ttl: ttl},
+			NextDomain: s.service.HostName,
+			TypeBitMap: addressTypeBitmap(v4, v6),
+		})
 	}
 	return list
+}
+
+func addressTypeBitmap(v4, v6 []net.IP) []uint16 {
+	types := make([]uint16, 0, 2)
+	if len(v4) > 0 {
+		types = append(types, dns.TypeA)
+	}
+	if len(v6) > 0 {
+		types = append(types, dns.TypeAAAA)
+	}
+	return types
 }
 
 func addrsForInterface(iface *net.Interface) ([]net.IP, []net.IP) {

@@ -32,14 +32,18 @@ var initialQueryInterval = 4 * time.Second
 
 // Client structure encapsulates both IPv4/IPv6 UDP connections.
 type client struct {
-	ipv4conn *ipv4.PacketConn
-	ipv6conn *ipv6.PacketConn
-	ifaces   []net.Interface
+	ipv4conn        *ipv4.PacketConn
+	ipv6conn        *ipv6.PacketConn
+	ifaces          []net.Interface
+	unannouncements bool
 }
 
 type clientOpts struct {
-	listenOn IPType
-	ifaces   []net.Interface
+	listenOn        IPType
+	ifaces          []net.Interface
+	unannouncements bool
+	unicast         bool
+	resolvers       []string
 }
 
 // ClientOption fills the option struct to configure intefaces, etc.
@@ -60,6 +64,13 @@ func SelectIPTraffic(t IPType) ClientOption {
 func SelectIfaces(ifaces []net.Interface) ClientOption {
 	return func(o *clientOpts) {
 		o.ifaces = ifaces
+	}
+}
+
+// Unannouncements emits an expired entry when a previously emitted service is removed.
+func Unannouncements() ClientOption {
+	return func(o *clientOpts) {
+		o.unannouncements = true
 	}
 }
 
@@ -157,9 +168,10 @@ func newClient(opts clientOpts) (*client, error) {
 	}
 
 	return &client{
-		ipv4conn: ipv4conn,
-		ipv6conn: ipv6conn,
-		ifaces:   ifaces,
+		ipv4conn:        ipv4conn,
+		ipv6conn:        ipv6conn,
+		ifaces:          ifaces,
+		unannouncements: opts.unannouncements,
 	}, nil
 }
 
@@ -277,10 +289,14 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 			for k, e := range entries {
 				if !e.Expiry.After(now) {
 					delete(entries, k)
+					if _, sent := sentEntries[k]; sent && c.unannouncements {
+						e.Removed = true
+						params.Entries <- e
+					}
 					delete(sentEntries, k)
 					continue
 				}
-				if _, ok := sentEntries[k]; ok {
+				if refreshCachedEntry(sentEntries, k, e) {
 					continue
 				}
 
@@ -304,6 +320,15 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 			}
 		}
 	}
+}
+
+func refreshCachedEntry(sentEntries map[string]*ServiceEntry, key string, entry *ServiceEntry) bool {
+	cached, ok := sentEntries[key]
+	if !ok {
+		return false
+	}
+	cached.Expiry = entry.Expiry
+	return true
 }
 
 // Shutdown client will close currently open connections and channel implicitly.
