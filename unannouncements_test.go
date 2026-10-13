@@ -10,10 +10,11 @@ func TestBrowseEmitsUnannouncement(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 
+	ifaces := testMulticastIfaces(t)
 	entries := make(chan *ServiceEntry, 10)
 	browseErrors := make(chan error, 1)
 	go func() {
-		browseErrors <- Browse(ctx, "_goodbye--xxxx._tcp", mdnsDomain, entries, Unannouncements(), SelectIfaces(testMulticastIfaces(t)), SelectIPTraffic(IPv4))
+		browseErrors <- Browse(ctx, "_goodbye--xxxx._tcp", mdnsDomain, entries, Unannouncements(), SelectIfaces(ifaces), SelectIPTraffic(IPv4))
 	}()
 
 	server, err := registerTestService(t, "goodbye--xxxxxxxxxxxx", "_goodbye--xxxx._tcp", mdnsDomain, mdnsPort, []string{"id=goodbye"})
