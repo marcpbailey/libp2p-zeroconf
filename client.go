@@ -32,14 +32,18 @@ var initialQueryInterval = 4 * time.Second
 
 // Client structure encapsulates both IPv4/IPv6 UDP connections.
 type client struct {
-	ipv4conn *ipv4.PacketConn
-	ipv6conn *ipv6.PacketConn
-	ifaces   []net.Interface
+	ipv4conn        *ipv4.PacketConn
+	ipv6conn        *ipv6.PacketConn
+	ifaces          []net.Interface
+	unannouncements bool
 }
 
 type clientOpts struct {
-	listenOn IPType
-	ifaces   []net.Interface
+	listenOn        IPType
+	ifaces          []net.Interface
+	unannouncements bool
+	unicast         bool
+	resolvers       []string
 }
 
 // ClientOption fills the option struct to configure intefaces, etc.
@@ -63,10 +67,21 @@ func SelectIfaces(ifaces []net.Interface) ClientOption {
 	}
 }
 
+// Unannouncements emits an expired entry when a previously emitted service is removed.
+func Unannouncements() ClientOption {
+	return func(o *clientOpts) {
+		o.unannouncements = true
+	}
+}
+
 // Browse for all services of a given type in a given domain.
 // Received entries are sent on the entries channel.
 // It blocks until the context is canceled (or an error occurs).
 func Browse(ctx context.Context, service, domain string, entries chan<- *ServiceEntry, opts ...ClientOption) error {
+	conf := applyOpts(opts...)
+	if conf.unicast {
+		return runUnicast(ctx, "", service, domain, entries, true, conf)
+	}
 	cl, err := newClient(applyOpts(opts...))
 	if err != nil {
 		return err
@@ -84,6 +99,10 @@ func Browse(ctx context.Context, service, domain string, entries chan<- *Service
 // Received entries are sent on the entries channel.
 // It blocks until the context is canceled (or an error occurs).
 func Lookup(ctx context.Context, instance, service, domain string, entries chan<- *ServiceEntry, opts ...ClientOption) error {
+	conf := applyOpts(opts...)
+	if conf.unicast {
+		return runUnicast(ctx, instance, service, domain, entries, false, conf)
+	}
 	cl, err := newClient(applyOpts(opts...))
 	if err != nil {
 		return err
@@ -139,27 +158,34 @@ func newClient(opts clientOpts) (*client, error) {
 	}
 	// IPv4 interfaces
 	var ipv4conn *ipv4.PacketConn
+	var err4 error
 	if (opts.listenOn & IPv4) > 0 {
-		var err error
-		ipv4conn, err = joinUdp4Multicast(ifaces)
-		if err != nil {
-			return nil, err
-		}
+		ipv4conn, err4 = joinUdp4Multicast(ifaces)
 	}
 	// IPv6 interfaces
 	var ipv6conn *ipv6.PacketConn
+	var err6 error
 	if (opts.listenOn & IPv6) > 0 {
-		var err error
-		ipv6conn, err = joinUdp6Multicast(ifaces)
-		if err != nil {
-			return nil, err
+		ipv6conn, err6 = joinUdp6Multicast(ifaces)
+	}
+	if ipv4conn == nil && ipv6conn == nil {
+		switch {
+		case err4 != nil && err6 != nil:
+			return nil, fmt.Errorf("no supported mDNS transport (IPv4: %v; IPv6: %v)", err4, err6)
+		case err4 != nil:
+			return nil, fmt.Errorf("IPv4 mDNS transport: %w", err4)
+		case err6 != nil:
+			return nil, fmt.Errorf("IPv6 mDNS transport: %w", err6)
+		default:
+			return nil, fmt.Errorf("no mDNS transport enabled")
 		}
 	}
 
 	return &client{
-		ipv4conn: ipv4conn,
-		ipv6conn: ipv6conn,
-		ifaces:   ifaces,
+		ipv4conn:        ipv4conn,
+		ipv6conn:        ipv6conn,
+		ifaces:          ifaces,
+		unannouncements: opts.unannouncements,
 	}, nil
 }
 
@@ -198,6 +224,10 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 			}
 			continue
 		case msg := <-msgCh:
+			// Probe authority and query known-answer records are not established answers.
+			if !msg.Response {
+				continue
+			}
 			now = time.Now()
 			entries = make(map[string]*ServiceEntry)
 			sections := append(msg.Answer, msg.Ns...)
@@ -273,10 +303,14 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 			for k, e := range entries {
 				if !e.Expiry.After(now) {
 					delete(entries, k)
+					if _, sent := sentEntries[k]; sent && c.unannouncements {
+						e.Removed = true
+						params.Entries <- e
+					}
 					delete(sentEntries, k)
 					continue
 				}
-				if _, ok := sentEntries[k]; ok {
+				if refreshCachedEntry(sentEntries, k, e) {
 					continue
 				}
 
@@ -300,6 +334,15 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 			}
 		}
 	}
+}
+
+func refreshCachedEntry(sentEntries map[string]*ServiceEntry, key string, entry *ServiceEntry) bool {
+	cached, ok := sentEntries[key]
+	if !ok {
+		return false
+	}
+	cached.Expiry = entry.Expiry
+	return true
 }
 
 // Shutdown client will close currently open connections and channel implicitly.

@@ -1,4 +1,4 @@
-ZeroConf: Service Discovery with mDNS
+ZeroConf: Service Discovery with DNS-SD
 =====================================
 ZeroConf is a pure Golang library that employs Multicast DNS-SD for
 
@@ -50,6 +50,10 @@ A subtype may added to service name to narrow the set of results. E.g. to browse
 
 See https://github.com/libp2p/zeroconf/blob/master/examples/resolv/client.go.
 
+## Unicast discovery in an explicit DNS domain
+
+Use the opt-in `UnicastDNS()` client option with Browse or Lookup. Existing calls remain multicast. See [unicast DNS-SD](UNICAST.md) for resolver configuration, SRV candidates, refresh, removal and cancellation, and the [executable example](examples/unicast/client.go).
+
 ## Lookup a specific service instance
 
 ```go
@@ -57,6 +61,23 @@ See https://github.com/libp2p/zeroconf/blob/master/examples/resolv/client.go.
 ```
 
 ## Register a service
+
+For hostname addresses without a service, use
+[standalone hostname registration](HOSTNAME-REGISTRATION.md).
+
+`Register` and `RegisterProxy` return after transport setup and start probing asynchronously.
+Call `server.WaitForReady(ctx)` to wait for the initial establishment result. Canceling
+that context only stops waiting; use `Shutdown` to stop the registration. The initial
+result stays unchanged after readiness. Later terminal failures close `server.Done()`;
+`server.Err()` returns their cause. A `*zeroconf.ConflictError` identifies the conflicting
+name and interface index. Registration does not rename automatically. Failure on a
+required interface stops the whole registration and withdraws its established records.
+
+When another responder shares the mDNS port, probing uses multicast replies and two
+additional probes at the same 250 ms spacing, adding 500 ms before readiness. Windows
+uses native packet information for per-interface registration. Its native execution
+has not been validated; source tests and cross-compilation do not establish runtime
+compatibility.
 
 ```go
 server, err := zeroconf.Register("GoZeroconf", "_workstation._tcp", "local.", 42424, []string{"txtv=0", "lo=1", "la=2"}, nil)
