@@ -316,6 +316,9 @@ func (s *Server) start() {
 // SetText updates the TXT records. Tentative records are updated without an
 // announcement; established records are announced on their established links.
 func (s *Server) SetText(text []string) {
+	if s.service == nil {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.isShutdown {
