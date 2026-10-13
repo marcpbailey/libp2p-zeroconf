@@ -89,25 +89,49 @@ func (s *Server) readPacket6(c *ipv6.PacketConn, b []byte) (int, *ipv6.ControlMe
 }
 func (s *Server) writePacket4(b []byte, cm *ipv4.ControlMessage, to net.Addr) (int, error) {
 	index := 0
+	var source net.IP
 	if cm != nil {
 		index = cm.IfIndex
+		if index != 0 {
+			iface, err := net.InterfaceByIndex(index)
+			if err != nil {
+				return 0, err
+			}
+			source, err = windowsInterfaceAddress(iface, false, to.(*net.UDPAddr).IP)
+			if err != nil {
+				return 0, err
+			}
+		}
 	}
-	return writeWindowsPacket(s.ipv4conn.PacketConn, b, index, false, to)
+	return writeWindowsPacket(s.ipv4conn.PacketConn, b, index, false, to, source)
 }
 func (s *Server) writePacket6(b []byte, cm *ipv6.ControlMessage, to net.Addr) (int, error) {
 	index := 0
+	var source net.IP
 	if cm != nil && cm.IfIndex != 0 {
-		index = s.ipv6IfIndexes[cm.IfIndex]
+		canonicalIndex := cm.IfIndex
+		index = s.ipv6IfIndexes[canonicalIndex]
 		if index == 0 {
 			return 0, fmt.Errorf("no native IPv6 index for interface %d", cm.IfIndex)
 		}
+		iface, err := net.InterfaceByIndex(canonicalIndex)
+		if err != nil {
+			return 0, err
+		}
+		source, err = windowsInterfaceAddress(iface, true, to.(*net.UDPAddr).IP)
+		if err != nil {
+			return 0, err
+		}
 	}
-	return writeWindowsPacket(s.ipv6conn.PacketConn, b, index, true, to)
+	return writeWindowsPacket(s.ipv6conn.PacketConn, b, index, true, to, source)
 }
-func writeWindowsPacket(c net.PacketConn, b []byte, index int, ipv6 bool, to net.Addr) (int, error) {
+func writeWindowsPacket(c net.PacketConn, b []byte, index int, ipv6 bool, to net.Addr, source net.IP) (int, error) {
 	var control []byte
 	if index != 0 {
-		control = windowsPacketControl(index, strconv.IntSize/8, ipv6)
+		if source == nil {
+			return 0, fmt.Errorf("missing source address for interface %d", index)
+		}
+		control = windowsPacketControl(index, strconv.IntSize/8, ipv6, source)
 	}
 	destination := to.(*net.UDPAddr)
 	if ipv6 {
@@ -115,4 +139,49 @@ func writeWindowsPacket(c net.PacketConn, b []byte, index int, ipv6 bool, to net
 	}
 	n, _, err := c.(*net.UDPConn).WriteMsgUDP(b, control, destination)
 	return n, err
+}
+
+func windowsInterfaceAddress(iface *net.Interface, ipv6 bool, destination net.IP) (net.IP, error) {
+	addresses, err := iface.Addrs()
+	if err != nil {
+		return nil, err
+	}
+	preferLinkLocal := destination.IsLinkLocalMulticast() || destination.IsLinkLocalUnicast()
+	var fallback net.IP
+	for _, address := range addresses {
+		var ip net.IP
+		switch address := address.(type) {
+		case *net.IPNet:
+			ip = address.IP
+		case *net.IPAddr:
+			ip = address.IP
+		}
+		if ipv6 {
+			if ip.To4() != nil || ip.To16() == nil {
+				continue
+			}
+		} else {
+			ip = ip.To4()
+			if ip == nil {
+				continue
+			}
+		}
+		if ip.IsUnspecified() || ip.IsMulticast() || ip.IsLoopback() {
+			continue
+		}
+		if fallback == nil {
+			fallback = append(net.IP(nil), ip...)
+		}
+		if ip.IsLinkLocalUnicast() == preferLinkLocal {
+			return append(net.IP(nil), ip...), nil
+		}
+	}
+	if fallback != nil {
+		return fallback, nil
+	}
+	family := "IPv4"
+	if ipv6 {
+		family = "IPv6"
+	}
+	return nil, fmt.Errorf("no %s source address on interface %s (%d)", family, iface.Name, iface.Index)
 }
