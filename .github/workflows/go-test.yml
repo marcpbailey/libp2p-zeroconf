@@ -29,11 +29,6 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.26.x'
-      - name: Add multicast route for integration tests
-        run: |
-          sudo route -n add -host 239.255.42.33 -interface en0 || \
-            sudo route -n change -host 239.255.42.33 -interface en0
-          route -n get 239.255.42.33
       - name: Run full test suite
         env:
           CGO_ENABLED: '1'
