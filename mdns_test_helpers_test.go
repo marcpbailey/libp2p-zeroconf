@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// Multicast integration tests use private groups and a test port on one
-// interface, and never claim the computer's hostname.
+// Multicast integration tests use the standard mDNS groups and a test port on
+// one interface, and never claim the computer's hostname.
 func testMulticastIfaces(t *testing.T) []net.Interface {
 	t.Helper()
 	interfaces, err := net.Interfaces()
@@ -40,8 +40,8 @@ func registerTestService(t *testing.T, instance, service, domain string, port in
 	return RegisterProxy(instance, service, domain, port, host, []string{"127.0.0.1"}, text, testMulticastIfaces(t))
 }
 
-// Use private test destinations and multicast bindings, never the system mDNS
-// port or multicast groups. The protocol processing remains unchanged.
+// Use the standard mDNS groups with a test port, never the system mDNS port.
+// The protocol processing remains unchanged.
 func TestMain(m *testing.M) {
 	if os.Getenv("ZEROCONF_INTEROP_INTERFACE") != "" {
 		flag.Parse()
@@ -59,8 +59,8 @@ func TestMain(m *testing.M) {
 	}
 	port := listener.LocalAddr().(*net.UDPAddr).Port
 	listener.Close()
-	mdnsGroupIPv4 = net.ParseIP("239.255.42.33")
-	mdnsGroupIPv6 = net.ParseIP("ff02::114")
+	mdnsGroupIPv4 = net.ParseIP("224.0.0.251")
+	mdnsGroupIPv6 = net.ParseIP("ff02::fb")
 	mdnsWildcardAddrIPv4 = &net.UDPAddr{IP: mdnsGroupIPv4, Port: port}
 	mdnsWildcardAddrIPv6 = &net.UDPAddr{IP: net.ParseIP("ff02::"), Port: port}
 	ipv4Addr = &net.UDPAddr{IP: mdnsGroupIPv4, Port: port}
