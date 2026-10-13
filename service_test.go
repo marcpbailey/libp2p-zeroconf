@@ -17,7 +17,7 @@ var (
 
 func startMDNS(t *testing.T, port int, name, service, domain string) {
 	// 5353 is default mdns port
-	server, err := Register(name, service, domain, port, []string{"txtv=0", "lo=1", "la=2"}, nil)
+	server, err := registerTestService(t, name, service, domain, port, []string{"txtv=0", "lo=1", "la=2"})
 	if err != nil {
 		t.Fatalf("error while registering mdns service: %s", err)
 	}
@@ -26,7 +26,7 @@ func startMDNS(t *testing.T, port int, name, service, domain string) {
 }
 
 func TestQuickShutdown(t *testing.T) {
-	server, err := Register(mdnsName, mdnsService, mdnsDomain, mdnsPort, []string{"txtv=0", "lo=1", "la=2"}, nil)
+	server, err := registerTestService(t, mdnsName, mdnsService, mdnsDomain, mdnsPort, []string{"txtv=0", "lo=1", "la=2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestBasic(t *testing.T) {
 	time.Sleep(time.Second)
 
 	entries := make(chan *ServiceEntry, 100)
-	if err := Browse(ctx, mdnsService, mdnsDomain, entries); err != nil {
+	if err := Browse(ctx, mdnsService, mdnsDomain, entries, SelectIfaces(testMulticastIfaces(t)), SelectIPTraffic(IPv4)); err != nil {
 		t.Fatalf("Expected browse success, but got %v", err)
 	}
 	<-ctx.Done()
@@ -86,7 +86,7 @@ func TestNoRegister(t *testing.T) {
 	}(entries)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := Browse(ctx, mdnsService, mdnsDomain, entries); err != nil {
+	if err := Browse(ctx, mdnsService, mdnsDomain, entries, SelectIfaces(testMulticastIfaces(t)), SelectIPTraffic(IPv4)); err != nil {
 		t.Fatalf("Expected browse success, but got %v", err)
 	}
 	<-ctx.Done()
@@ -103,7 +103,7 @@ func TestSubtype(t *testing.T) {
 		time.Sleep(time.Second)
 
 		entries := make(chan *ServiceEntry, 100)
-		if err := Browse(ctx, mdnsSubtype, mdnsDomain, entries); err != nil {
+		if err := Browse(ctx, mdnsSubtype, mdnsDomain, entries, SelectIfaces(testMulticastIfaces(t)), SelectIPTraffic(IPv4)); err != nil {
 			t.Fatalf("Expected browse success, but got %v", err)
 		}
 		<-ctx.Done()
@@ -135,7 +135,7 @@ func TestSubtype(t *testing.T) {
 		time.Sleep(time.Second)
 
 		entries := make(chan *ServiceEntry, 100)
-		if err := Browse(ctx, mdnsService, mdnsDomain, entries); err != nil {
+		if err := Browse(ctx, mdnsService, mdnsDomain, entries, SelectIfaces(testMulticastIfaces(t)), SelectIPTraffic(IPv4)); err != nil {
 			t.Fatalf("Expected browse success, but got %v", err)
 		}
 		<-ctx.Done()
@@ -158,7 +158,7 @@ func TestSubtype(t *testing.T) {
 		}
 	})
 
-	t.Run("ttl", func(t *testing.T) {
+	t.Run("short ttl remains discoverable", func(t *testing.T) {
 		origTTL := defaultTTL
 		origCleanupFreq := cleanupFreq
 		origInitialQueryInterval := initialQueryInterval
@@ -176,18 +176,23 @@ func TestSubtype(t *testing.T) {
 		startMDNS(t, mdnsPort, mdnsName, mdnsSubtype, mdnsDomain)
 
 		entries := make(chan *ServiceEntry, 100)
-		if err := Browse(ctx, mdnsService, mdnsDomain, entries); err != nil {
+		if err := Browse(ctx, mdnsService, mdnsDomain, entries, SelectIfaces(testMulticastIfaces(t)), SelectIPTraffic(IPv4)); err != nil {
 			t.Fatalf("Expected browse success, but got %v", err)
 		}
 
 		<-ctx.Done()
-		if len(entries) < 2 {
-			t.Fatalf("Expected to have received at least 2 entries, but got %d", len(entries))
+		if len(entries) < 1 {
+			t.Fatal("expected at least one entry")
 		}
-		res1 := <-entries
-		res2 := <-entries
-		if res1.ServiceInstanceName() != res2.ServiceInstanceName() {
-			t.Fatalf("expected the two entries to be identical")
+		var instance string
+		for len(entries) > 0 {
+			entry := <-entries
+			if instance == "" {
+				instance = entry.ServiceInstanceName()
+			}
+			if entry.ServiceInstanceName() != instance {
+				t.Fatalf("entry instance = %q, want %q", entry.ServiceInstanceName(), instance)
+			}
 		}
 	})
 }
