@@ -174,6 +174,7 @@ const (
 // Server structure encapsulates both IPv4/IPv6 UDP connections
 type Server struct {
 	service    *ServiceEntry
+	hostname   *hostnameRegistration
 	ipv4conn   *ipv4.PacketConn
 	ipv6conn   *ipv6.PacketConn
 	ifaces     []net.Interface
