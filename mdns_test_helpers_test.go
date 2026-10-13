@@ -14,6 +14,8 @@ import (
 // interface, and never claim the computer's hostname.
 func testMulticastIfaces(t *testing.T) []net.Interface {
 	t.Helper()
+	// GitHub-hosted macOS runners cannot route mDNS multicast, so these tests
+	// cannot exercise the standard multicast groups there.
 	if runtime.GOOS == "darwin" && os.Getenv("RUNNER_ENVIRONMENT") == "github-hosted" {
 		t.Skip("GitHub-hosted macOS runners have no route to the standard mDNS multicast group")
 	}
