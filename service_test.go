@@ -76,6 +76,7 @@ func TestBasic(t *testing.T) {
 }
 
 func TestNoRegister(t *testing.T) {
+	ifaces := testMulticastIfaces(t)
 	// before register, mdns resolve shuold not have any entry
 	entries := make(chan *ServiceEntry)
 	go func(results <-chan *ServiceEntry) {
@@ -86,7 +87,7 @@ func TestNoRegister(t *testing.T) {
 	}(entries)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := Browse(ctx, mdnsService, mdnsDomain, entries, SelectIfaces(testMulticastIfaces(t)), SelectIPTraffic(IPv4)); err != nil {
+	if err := Browse(ctx, mdnsService, mdnsDomain, entries, SelectIfaces(ifaces), SelectIPTraffic(IPv4)); err != nil {
 		t.Fatalf("Expected browse success, but got %v", err)
 	}
 	<-ctx.Done()
