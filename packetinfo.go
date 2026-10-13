@@ -48,7 +48,7 @@ func windowsPacketInterface(control []byte, wordSize int, ipv6 bool) (int, error
 		control = control[next:]
 	}
 	if index == 0 {
-		return 0, fmt.Errorf("Windows packet information missing")
+		return 0, fmt.Errorf("windows packet information missing")
 	}
 	return index, nil
 }

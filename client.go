@@ -158,20 +158,26 @@ func newClient(opts clientOpts) (*client, error) {
 	}
 	// IPv4 interfaces
 	var ipv4conn *ipv4.PacketConn
+	var err4 error
 	if (opts.listenOn & IPv4) > 0 {
-		var err error
-		ipv4conn, err = joinUdp4Multicast(ifaces)
-		if err != nil {
-			return nil, err
-		}
+		ipv4conn, err4 = joinUdp4Multicast(ifaces)
 	}
 	// IPv6 interfaces
 	var ipv6conn *ipv6.PacketConn
+	var err6 error
 	if (opts.listenOn & IPv6) > 0 {
-		var err error
-		ipv6conn, err = joinUdp6Multicast(ifaces)
-		if err != nil {
-			return nil, err
+		ipv6conn, err6 = joinUdp6Multicast(ifaces)
+	}
+	if ipv4conn == nil && ipv6conn == nil {
+		switch {
+		case err4 != nil && err6 != nil:
+			return nil, fmt.Errorf("no supported mDNS transport (IPv4: %v; IPv6: %v)", err4, err6)
+		case err4 != nil:
+			return nil, fmt.Errorf("IPv4 mDNS transport: %w", err4)
+		case err6 != nil:
+			return nil, fmt.Errorf("IPv6 mDNS transport: %w", err6)
+		default:
+			return nil, fmt.Errorf("no mDNS transport enabled")
 		}
 	}
 
