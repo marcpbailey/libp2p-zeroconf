@@ -27,8 +27,11 @@ UDPConn.ReadMsgUDP; preserving multiple-interface support is the intended result
 Socket/packet errors are reported through the lifecycle API. A family with no
 usable interface address is not opened.
 
-Default tests use private multicast groups and an ephemeral port. Native responder
-tests require `-tags interop`, a specific `ZEROCONF_INTEROP_INTERFACE`, and a
+Default multicast integration tests use the standard mDNS groups on an ephemeral
+test port. GitHub-hosted macOS runs skip these tests because the runner has no
+route to the standard group; local macOS, self-hosted macOS, and other supported
+runners run them when an active IPv4 multicast interface is available. Native
+responder tests require `-tags interop`, a specific `ZEROCONF_INTEROP_INTERFACE`, and a
 `-run` filter selecting only the interoperability test. They publish synthetic
 names. `ZEROCONF_INTEROP_CAPTURE` optionally records only these test DNS wire
 packets with source and interface metadata through an ordinary UDP listener.
