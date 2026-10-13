@@ -1,0 +1,30 @@
+name: Unicast DNS-SD platform tests
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unicast:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.21.x'
+      - name: Test native resolver and controlled DNS server
+        shell: bash
+        run: |
+          flags=()
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            flags=(-ldflags=-linkmode=external)
+          fi
+          go test "${flags[@]}" ./... -run 'TestUnicast|TestDNSNegative|TestDarwinResolver|TestSystemResolver|TestResolverAddresses|TestProxy|TestRefreshCachedEntry|TestUnannouncementsOption' -count=1 -timeout 60s
