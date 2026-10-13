@@ -540,7 +540,8 @@ func isKnownAnswer(resp *dns.Msg, query *dns.Msg) bool {
 
 // handleQuestion is used to handle an incoming question
 func (s *Server) handleQuestion(q dns.Question, resp *dns.Msg, query *dns.Msg, ifIndex int) error {
-	if s.service == nil {
+	host := s.hostnameData()
+	if host.name == "" {
 		return nil
 	}
 
@@ -551,8 +552,11 @@ func (s *Server) handleQuestion(q dns.Question, resp *dns.Msg, query *dns.Msg, i
 	if q.Qclass & ^qClassCacheFlush != dns.ClassINET && q.Qclass & ^qClassCacheFlush != dns.ClassANY {
 		return nil
 	}
-	if sameMDNSName(q.Name, s.service.HostName) {
+	if sameMDNSName(q.Name, host.name) {
 		resp.Answer = s.appendAddrsForType(resp.Answer, s.ttl, ifIndex, true, q.Qtype)
+		return nil
+	}
+	if s.service == nil {
 		return nil
 	}
 
@@ -715,8 +719,9 @@ func (s *Server) appendAddrs(list []dns.RR, ttl uint32, ifIndex int, flushCache 
 }
 
 func (s *Server) appendAddrsForType(list []dns.RR, ttl uint32, ifIndex int, flushCache bool, qtype uint16) []dns.RR {
-	v4 := s.service.AddrIPv4
-	v6 := s.service.AddrIPv6
+	host := s.hostnameData()
+	v4 := host.v4
+	v6 := host.v6
 	if s.interfaceAddrs != nil {
 		v4, v6 = nil, nil
 		for _, ip := range s.interfaceAddrs[ifIndex] {
@@ -747,7 +752,7 @@ func (s *Server) appendAddrsForType(list []dns.RR, ttl uint32, ifIndex int, flus
 	if qtype == dns.TypeA || qtype == dns.TypeANY {
 		for _, ip := range v4 {
 			list = append(list, &dns.A{
-				Hdr: dns.RR_Header{Name: s.service.HostName, Rrtype: dns.TypeA, Class: dns.ClassINET | cacheFlushBit, Ttl: ttl},
+				Hdr: dns.RR_Header{Name: host.name, Rrtype: dns.TypeA, Class: dns.ClassINET | cacheFlushBit, Ttl: ttl},
 				A:   ip,
 			})
 		}
@@ -755,15 +760,15 @@ func (s *Server) appendAddrsForType(list []dns.RR, ttl uint32, ifIndex int, flus
 	if qtype == dns.TypeAAAA || qtype == dns.TypeANY {
 		for _, ip := range v6 {
 			list = append(list, &dns.AAAA{
-				Hdr:  dns.RR_Header{Name: s.service.HostName, Rrtype: dns.TypeAAAA, Class: dns.ClassINET | cacheFlushBit, Ttl: ttl},
+				Hdr:  dns.RR_Header{Name: host.name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET | cacheFlushBit, Ttl: ttl},
 				AAAA: ip,
 			})
 		}
 	}
 	if len(v4)+len(v6) > 0 && (len(v4) == 0 || len(v6) == 0) {
 		list = append(list, &dns.NSEC{
-			Hdr:        dns.RR_Header{Name: s.service.HostName, Rrtype: dns.TypeNSEC, Class: dns.ClassINET | cacheFlushBit, Ttl: ttl},
-			NextDomain: s.service.HostName,
+			Hdr:        dns.RR_Header{Name: host.name, Rrtype: dns.TypeNSEC, Class: dns.ClassINET | cacheFlushBit, Ttl: ttl},
+			NextDomain: host.name,
 			TypeBitMap: addressTypeBitmap(v4, v6),
 		})
 	}
