@@ -251,18 +251,6 @@ func newServer(ifaces []net.Interface, opts serverOpts) (*Server, error) {
 	if err6 != nil {
 		log.Printf("[zeroconf] no suitable IPv6 interface: %s", err6.Error())
 	}
-	if len(ifaces4) > 0 && err4 != nil {
-		if ipv6conn != nil {
-			ipv6conn.Close()
-		}
-		return nil, fmt.Errorf("IPv4 mDNS transport: %w", err4)
-	}
-	if len(ifaces6) > 0 && err6 != nil {
-		if ipv4conn != nil {
-			ipv4conn.Close()
-		}
-		return nil, fmt.Errorf("IPv6 mDNS transport: %w", err6)
-	}
 	for _, iface := range ifaces {
 		if (ipv4conn == nil || !hasInterface(ifaces4, iface.Index)) && (ipv6conn == nil || !hasInterface(ifaces6, iface.Index)) {
 			if ipv4conn != nil {
