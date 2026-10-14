@@ -26,6 +26,28 @@ func TestAutomaticInterfaceSelectionSkipsInterfacesWithoutAddresses(t *testing.T
 	}
 }
 
+func TestAutomaticInterfaceSelectionSkipsLoopbackAndPointToPoint(t *testing.T) {
+	loopback := net.Interface{Index: 8, Name: "lo0", Flags: net.FlagUp | net.FlagLoopback | net.FlagMulticast}
+	tunnel := net.Interface{Index: 9, Name: "utun3", Flags: net.FlagUp | net.FlagPointToPoint | net.FlagMulticast}
+	ethernet := net.Interface{Index: 10, Name: "en0", Flags: net.FlagUp | net.FlagBroadcast | net.FlagMulticast}
+	bridge := net.Interface{Index: 11, Name: "bridge100", Flags: net.FlagUp | net.FlagBroadcast | net.FlagMulticast}
+	interfaces := []net.Interface{loopback, tunnel, ethernet, bridge}
+	addresses := map[int][]net.Addr{
+		loopback.Index: {&net.IPNet{IP: net.ParseIP("127.0.0.1")}},
+		tunnel.Index:   {&net.IPNet{IP: net.ParseIP("fe80::1")}},
+		ethernet.Index: {&net.IPNet{IP: net.ParseIP("192.0.2.10")}},
+		bridge.Index:   {&net.IPNet{IP: net.ParseIP("192.0.2.11")}},
+	}
+
+	got := eligibleMulticastInterfaces(interfaces, func(iface net.Interface) ([]net.Addr, error) {
+		return addresses[iface.Index], nil
+	})
+	want := []net.Interface{ethernet, bridge}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("automatic interfaces = %#v, want %#v", got, want)
+	}
+}
+
 func TestExplicitInterfaceSelectionRemainsSupported(t *testing.T) {
 	iface := testMulticastIfaces(t)[0]
 	server, err := RegisterProxy(

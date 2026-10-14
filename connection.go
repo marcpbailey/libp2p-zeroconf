@@ -156,6 +156,9 @@ func eligibleMulticastInterfaces(ifaces []net.Interface, addresses func(net.Inte
 		if (ifi.Flags & net.FlagUp) == 0 {
 			continue
 		}
+		if (ifi.Flags & (net.FlagLoopback | net.FlagPointToPoint)) != 0 {
+			continue
+		}
 		if (ifi.Flags & net.FlagMulticast) == 0 {
 			continue
 		}
