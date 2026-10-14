@@ -24,7 +24,8 @@ func RegisterHostname(host string, ips []string, ifaces []net.Interface, opts ..
 	if err != nil {
 		return nil, err
 	}
-	if len(ifaces) == 0 {
+	automatic := len(ifaces) == 0
+	if automatic {
 		ifaces = listMulticastInterfaces()
 	}
 	var addresses map[int][]net.IP
@@ -39,7 +40,9 @@ func RegisterHostname(host string, ips []string, ifaces []net.Interface, opts ..
 	if len(h.v4)+len(h.v6) == 0 {
 		return nil, fmt.Errorf("could not determine host IP addresses")
 	}
-	s, err := newServer(ifaces, applyServerOpts(opts...))
+	serverOpts := applyServerOpts(opts...)
+	serverOpts.automatic = automatic
+	s, err := newServer(ifaces, serverOpts)
 	if err != nil {
 		return nil, err
 	}

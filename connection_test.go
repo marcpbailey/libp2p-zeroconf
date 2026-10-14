@@ -48,6 +48,21 @@ func TestAutomaticInterfaceSelectionSkipsLoopbackAndPointToPoint(t *testing.T) {
 	}
 }
 
+func TestAutomaticInterfacesKeepCandidatesWithJoinedTransports(t *testing.T) {
+	failed := net.Interface{Index: 12, Name: "failed"}
+	ipv4 := net.Interface{Index: 13, Name: "ipv4"}
+	ipv6 := net.Interface{Index: 14, Name: "ipv6"}
+	got := interfacesWithTransport(
+		[]net.Interface{failed, ipv4, ipv6},
+		[]net.Interface{ipv4},
+		[]net.Interface{ipv6},
+	)
+	want := []net.Interface{ipv4, ipv6}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("automatic interfaces with joined transports = %#v, want %#v", got, want)
+	}
+}
+
 func TestExplicitInterfaceSelectionRemainsSupported(t *testing.T) {
 	iface := testMulticastIfaces(t)[0]
 	server, err := RegisterProxy(
