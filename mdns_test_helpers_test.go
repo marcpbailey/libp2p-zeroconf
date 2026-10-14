@@ -40,10 +40,10 @@ func testMulticastIfaces(t *testing.T) []net.Interface {
 	return nil
 }
 
-func registerTestService(t *testing.T, instance, service, domain string, port int, text []string) (*Server, error) {
+func registerTestService(t *testing.T, instance, service, domain string, port int, text []string, opts ...ServerOption) (*Server, error) {
 	t.Helper()
 	host := fmt.Sprintf("zeroconf-test-%d-%d.local.", os.Getpid(), time.Now().UnixNano())
-	return RegisterProxy(instance, service, domain, port, host, []string{"127.0.0.1"}, text, testMulticastIfaces(t))
+	return RegisterProxy(instance, service, domain, port, host, []string{"127.0.0.1"}, text, testMulticastIfaces(t), opts...)
 }
 
 // Use the standard mDNS groups with a test port, never the system mDNS port.

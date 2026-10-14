@@ -15,9 +15,9 @@ var (
 	mdnsPort    = 8888
 )
 
-func startMDNS(t *testing.T, port int, name, service, domain string) {
+func startMDNS(t *testing.T, port int, name, service, domain string, opts ...ServerOption) {
 	// 5353 is default mdns port
-	server, err := registerTestService(t, name, service, domain, port, []string{"txtv=0", "lo=1", "la=2"})
+	server, err := registerTestService(t, name, service, domain, port, []string{"txtv=0", "lo=1", "la=2"}, opts...)
 	if err != nil {
 		t.Fatalf("error while registering mdns service: %s", err)
 	}
@@ -160,18 +160,15 @@ func TestSubtype(t *testing.T) {
 	})
 
 	t.Run("short ttl remains discoverable", func(t *testing.T) {
-		origTTL := defaultTTL
 		origInitialQueryInterval := initialQueryInterval
 		t.Cleanup(func() {
-			defaultTTL = origTTL
 			initialQueryInterval = origInitialQueryInterval
 		})
-		defaultTTL = 1 // 1 second
 		initialQueryInterval = 100 * time.Millisecond
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		startMDNS(t, mdnsPort, mdnsName, mdnsSubtype, mdnsDomain)
+		startMDNS(t, mdnsPort, mdnsName, mdnsSubtype, mdnsDomain, TTL(1))
 
 		entries := make(chan *ServiceEntry, 100)
 		if err := Browse(ctx, mdnsService, mdnsDomain, entries, SelectIfaces(testMulticastIfaces(t)), SelectIPTraffic(IPv4)); err != nil {

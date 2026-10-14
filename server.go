@@ -20,17 +20,22 @@ const (
 	multicastRepetitions = 2
 )
 
-var defaultTTL uint32 = 3200
+const (
+	defaultHostTTL    uint32 = 120
+	defaultServiceTTL uint32 = 4500
+)
 
 type serverOpts struct {
 	ttl       uint32
+	hostTTL   uint32
 	automatic bool
 }
 
 func applyServerOpts(options ...ServerOption) serverOpts {
 	// Apply default configuration and load supplied options.
 	var conf = serverOpts{
-		ttl: defaultTTL,
+		ttl:     defaultServiceTTL,
+		hostTTL: defaultHostTTL,
 	}
 	for _, o := range options {
 		if o != nil {
@@ -43,10 +48,12 @@ func applyServerOpts(options ...ServerOption) serverOpts {
 // ServerOption fills the option struct.
 type ServerOption func(*serverOpts)
 
-// TTL sets the TTL for DNS replies.
+// TTL sets the TTL for all records created by a registration, including
+// service records and host address records.
 func TTL(ttl uint32) ServerOption {
 	return func(o *serverOpts) {
 		o.ttl = ttl
+		o.hostTTL = ttl
 	}
 }
 
@@ -192,6 +199,7 @@ type Server struct {
 	refCount       sync.WaitGroup
 	isShutdown     bool
 	ttl            uint32
+	hostTTL        uint32
 
 	mu             sync.Mutex
 	interfaceAddrs map[int][]net.IP
@@ -329,6 +337,7 @@ func newServer(ifaces []net.Interface, opts serverOpts) (*Server, error) {
 		ipv4Ifaces:     ifaces4,
 		ipv6Ifaces:     ifaces6,
 		ttl:            opts.ttl,
+		hostTTL:        opts.hostTTL,
 		shouldShutdown: make(chan struct{}),
 		ready:          make(chan struct{}),
 		done:           make(chan struct{}),
@@ -392,6 +401,7 @@ func (s *Server) SetText(text []string) {
 // Deprecated: This method is racy. Use the TTL server option instead.
 func (s *Server) TTL(ttl uint32) {
 	s.ttl = ttl
+	s.hostTTL = ttl
 }
 
 // Shutdown closes all udp connections and unregisters the service
@@ -610,7 +620,7 @@ func (s *Server) handleQuestion(q dns.Question, resp *dns.Msg, query *dns.Msg, i
 		return nil
 	}
 	if sameMDNSName(q.Name, host.name) {
-		resp.Answer = s.appendAddrsForType(resp.Answer, s.ttl, ifIndex, true, q.Qtype)
+		resp.Answer = s.appendAddrsForType(resp.Answer, s.hostTTL, ifIndex, true, q.Qtype)
 		return nil
 	}
 	if s.service == nil {
@@ -684,12 +694,16 @@ func (s *Server) composeBrowsingAnswers(resp *dns.Msg, ifIndex int) {
 	}
 	resp.Extra = append(resp.Extra, srv, txt)
 
-	resp.Extra = s.appendAddrs(resp.Extra, s.ttl, ifIndex, false)
+	resp.Extra = s.appendAddrs(resp.Extra, s.hostTTL, ifIndex, false)
 }
 
 func (s *Server) composeLookupAnswers(resp *dns.Msg, ttl uint32, ifIndex int, flushCache bool) {
+	hostTTL := s.hostTTL
+	if ttl == 0 {
+		hostTTL = 0
+	}
 	if s.service == nil {
-		resp.Answer = s.appendAddrs(resp.Answer, ttl, ifIndex, flushCache)
+		resp.Answer = s.appendAddrs(resp.Answer, hostTTL, ifIndex, flushCache)
 		return
 	}
 
@@ -752,7 +766,7 @@ func (s *Server) composeLookupAnswers(resp *dns.Msg, ttl uint32, ifIndex int, fl
 			})
 	}
 
-	resp.Answer = s.appendAddrs(resp.Answer, ttl, ifIndex, flushCache)
+	resp.Answer = s.appendAddrs(resp.Answer, hostTTL, ifIndex, flushCache)
 }
 
 func (s *Server) serviceTypeName(resp *dns.Msg, ttl uint32) {
@@ -801,11 +815,6 @@ func (s *Server) appendAddrsForType(list []dns.RR, ttl uint32, ifIndex int, flus
 			v4 = append(v4, a4...)
 			v6 = append(v6, a6...)
 		}
-	}
-	if ttl > 0 {
-		// RFC6762 Section 10 recommends 120s for A/AAAA records so they
-		// account for network interface and address changes.
-		ttl = 120
 	}
 	var cacheFlushBit uint16
 	if flushCache {

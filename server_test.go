@@ -17,13 +17,104 @@ func testProxyServer(v4, v6 []string) *Server {
 	for _, address := range v6 {
 		entry.AddrIPv6 = append(entry.AddrIPv6, net.ParseIP(address))
 	}
-	return &Server{service: entry, ttl: 10, probes: map[int]*interfaceProbe{1: {established: true}}}
+	return &Server{service: entry, ttl: defaultServiceTTL, hostTTL: defaultHostTTL, probes: map[int]*interfaceProbe{1: {established: true}}}
+}
+
+func ttlTestServiceServer(opts ...ServerOption) *Server {
+	entry := newServiceEntry("TTL test", "_ttl-test._tcp", "local")
+	entry.HostName = "ttl-test.local."
+	entry.Port = 8080
+	entry.Text = []string{"id=ttl-test"}
+	entry.AddrIPv4 = []net.IP{net.ParseIP("192.0.2.10")}
+	entry.AddrIPv6 = []net.IP{net.ParseIP("2001:db8::10")}
+	conf := applyServerOpts(opts...)
+	return &Server{service: entry, ttl: conf.ttl, hostTTL: conf.hostTTL, probes: map[int]*interfaceProbe{1: {established: true}}}
+}
+
+func ttlTestHostnameServer(opts ...ServerOption) *Server {
+	host, _ := newHostnameRegistration("ttl-test.local.", []string{"192.0.2.10", "2001:db8::10"})
+	conf := applyServerOpts(opts...)
+	return &Server{hostname: host, ttl: conf.ttl, hostTTL: conf.hostTTL, probes: map[int]*interfaceProbe{1: {established: true}}}
+}
+
+func assertRecordTTLs(t *testing.T, msg *dns.Msg, want map[uint16]uint32) {
+	t.Helper()
+	seen := make(map[uint16]bool)
+	for _, rr := range append(append([]dns.RR{}, msg.Answer...), msg.Extra...) {
+		ttl, ok := want[rr.Header().Rrtype]
+		if !ok {
+			t.Fatalf("unexpected record type %d: %s", rr.Header().Rrtype, rr)
+		}
+		if rr.Header().Ttl != ttl {
+			t.Errorf("%s TTL = %d, want %d", rr, rr.Header().Ttl, ttl)
+		}
+		seen[rr.Header().Rrtype] = true
+	}
+	for rrtype := range want {
+		if !seen[rrtype] {
+			t.Errorf("record type %d missing", rrtype)
+		}
+	}
+}
+
+func TestRegistrationTTLDefaults(t *testing.T) {
+	service := ttlTestServiceServer()
+	var lookup dns.Msg
+	service.composeLookupAnswers(&lookup, service.ttl, 1, true)
+	assertRecordTTLs(t, &lookup, map[uint16]uint32{
+		dns.TypeA: defaultHostTTL, dns.TypeAAAA: defaultHostTTL,
+		dns.TypePTR: defaultServiceTTL, dns.TypeSRV: defaultServiceTTL, dns.TypeTXT: defaultServiceTTL,
+	})
+
+	var serviceEnumeration dns.Msg
+	service.serviceTypeName(&serviceEnumeration, service.ttl)
+	assertRecordTTLs(t, &serviceEnumeration, map[uint16]uint32{dns.TypePTR: defaultServiceTTL})
+	var browse dns.Msg
+	service.composeBrowsingAnswers(&browse, 1)
+	assertRecordTTLs(t, &browse, map[uint16]uint32{
+		dns.TypeA: defaultHostTTL, dns.TypeAAAA: defaultHostTTL,
+		dns.TypePTR: defaultServiceTTL, dns.TypeSRV: defaultServiceTTL, dns.TypeTXT: defaultServiceTTL,
+	})
+
+	hostname := ttlTestHostnameServer()
+	var hostResponse dns.Msg
+	hostname.composeLookupAnswers(&hostResponse, hostname.ttl, 1, true)
+	assertRecordTTLs(t, &hostResponse, map[uint16]uint32{dns.TypeA: defaultHostTTL, dns.TypeAAAA: defaultHostTTL})
+}
+
+func TestRegistrationTTLOptionOverridesServiceAndHostRecords(t *testing.T) {
+	const ttl = 30
+	wantService := map[uint16]uint32{
+		dns.TypeA: ttl, dns.TypeAAAA: ttl, dns.TypePTR: ttl, dns.TypeSRV: ttl, dns.TypeTXT: ttl,
+	}
+	service := ttlTestServiceServer(TTL(ttl))
+	var lookup dns.Msg
+	service.composeLookupAnswers(&lookup, service.ttl, 1, true)
+	assertRecordTTLs(t, &lookup, wantService)
+	var browse dns.Msg
+	service.composeBrowsingAnswers(&browse, 1)
+	assertRecordTTLs(t, &browse, wantService)
+	var serviceEnumeration dns.Msg
+	service.serviceTypeName(&serviceEnumeration, service.ttl)
+	assertRecordTTLs(t, &serviceEnumeration, map[uint16]uint32{dns.TypePTR: ttl})
+
+	hostname := ttlTestHostnameServer(TTL(ttl))
+	var hostResponse dns.Msg
+	hostname.composeLookupAnswers(&hostResponse, hostname.ttl, 1, true)
+	assertRecordTTLs(t, &hostResponse, map[uint16]uint32{dns.TypeA: ttl, dns.TypeAAAA: ttl})
+	assertRecordTTLs(t, directHostnameResponse(t, hostname, dns.TypeANY), map[uint16]uint32{dns.TypeA: ttl, dns.TypeAAAA: ttl})
 }
 
 func directHostnameResponse(t *testing.T, server *Server, qtype uint16) *dns.Msg {
 	t.Helper()
+	var name string
+	if server.hostname != nil {
+		name = server.hostname.name
+	} else {
+		name = server.service.HostName
+	}
 	query := new(dns.Msg)
-	query.SetQuestion("API.EXAMPLE.LOCAL", qtype)
+	query.SetQuestion(name, qtype)
 	response := new(dns.Msg)
 	response.SetReply(query)
 	if err := server.handleQuestion(query.Question[0], response, query, 1); err != nil {

@@ -19,7 +19,7 @@ func TestTentativeRegistrationDoesNotAnswer(t *testing.T) {
 	e := newServiceEntry("test", "_test._tcp", "local.")
 	e.HostName = "test.local."
 	e.Port = 8000
-	s := &Server{service: e, ttl: 120}
+	s := &Server{service: e, ttl: 120, hostTTL: defaultHostTTL}
 	q := dns.Question{Name: e.ServiceInstanceName(), Qtype: dns.TypeANY, Qclass: dns.ClassINET}
 	var reply dns.Msg
 	if err := s.handleQuestion(q, &reply, &dns.Msg{}, 1); err != nil {
@@ -37,7 +37,8 @@ func protocolServer(t *testing.T) (*Server, *[]dns.Msg) {
 	e.Port = 8000
 	e.Text = []string{"v=1"}
 	e.AddrIPv4 = []net.IP{net.ParseIP("192.0.2.10"), net.ParseIP("192.0.2.11")}
-	s := &Server{service: e, ttl: 120, ifaces: []net.Interface{{Index: 1}},
+	conf := applyServerOpts()
+	s := &Server{service: e, ttl: conf.ttl, hostTTL: conf.hostTTL, ifaces: []net.Interface{{Index: 1}},
 		ready: make(chan struct{}), done: make(chan struct{}), wake: make(chan struct{}, 1), shouldShutdown: make(chan struct{})}
 	s.unicastProbes = true
 	s.initProbes()
