@@ -142,8 +142,22 @@ func cloneServiceEntry(entry *ServiceEntry) *ServiceEntry {
 	cloned := *entry
 	cloned.Subtypes = cloneStrings(entry.Subtypes)
 	cloned.Text = cloneStrings(entry.Text)
+	if entry.TXTRecords != nil {
+		cloned.TXTRecords = make([][]string, len(entry.TXTRecords))
+		for index, record := range entry.TXTRecords {
+			cloned.TXTRecords[index] = cloneStrings(record)
+		}
+	}
 	cloned.AddrIPv4 = cloneIPs(entry.AddrIPv4)
 	cloned.AddrIPv6 = cloneIPs(entry.AddrIPv6)
+	if entry.SRVCandidates != nil {
+		cloned.SRVCandidates = make([]SRVCandidate, len(entry.SRVCandidates))
+		for index, candidate := range entry.SRVCandidates {
+			cloned.SRVCandidates[index] = candidate
+			cloned.SRVCandidates[index].AddrIPv4 = cloneIPs(candidate.AddrIPv4)
+			cloned.SRVCandidates[index].AddrIPv6 = cloneIPs(candidate.AddrIPv6)
+		}
+	}
 	return &cloned
 }
 

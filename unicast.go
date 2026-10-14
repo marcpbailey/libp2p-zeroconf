@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -202,12 +201,6 @@ func earlier(a, b time.Time) time.Time {
 		return b
 	}
 	return a
-}
-
-func sameService(a, b *ServiceEntry) bool {
-	left, right := *a, *b
-	left.Expiry, right.Expiry = time.Time{}, time.Time{}
-	return reflect.DeepEqual(left, right)
 }
 
 // query retains old data on transient failures. It never extends that data's TTL.
