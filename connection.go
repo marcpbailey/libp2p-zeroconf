@@ -141,16 +141,30 @@ func joinUdp4MulticastLocked(interfaces []net.Interface, requireAll ...bool) (*i
 }
 
 func listMulticastInterfaces() []net.Interface {
-	var interfaces []net.Interface
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil
 	}
+	return eligibleMulticastInterfaces(ifaces, func(iface net.Interface) ([]net.Addr, error) {
+		return iface.Addrs()
+	})
+}
+
+func eligibleMulticastInterfaces(ifaces []net.Interface, addresses func(net.Interface) ([]net.Addr, error)) []net.Interface {
+	var interfaces []net.Interface
 	for _, ifi := range ifaces {
 		if (ifi.Flags & net.FlagUp) == 0 {
 			continue
 		}
-		if (ifi.Flags & net.FlagMulticast) > 0 {
+		if (ifi.Flags & net.FlagMulticast) == 0 {
+			continue
+		}
+		addrs, err := addresses(ifi)
+		if err != nil {
+			continue
+		}
+		ipv4, ipv6 := interfaceFamilies(addrs)
+		if ipv4 || ipv6 {
 			interfaces = append(interfaces, ifi)
 		}
 	}
