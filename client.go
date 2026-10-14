@@ -189,8 +189,6 @@ func newClient(opts clientOpts) (*client, error) {
 	}, nil
 }
 
-var cleanupFreq = 10 * time.Second
-
 // Start listeners and waits for the shutdown signal from exit channel
 func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 	// start listening for responses
@@ -201,34 +199,125 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 	if c.ipv6conn != nil {
 		go c.recv(ctx, c.ipv6conn, msgCh)
 	}
+	c.mainloopWithMessages(ctx, params, msgCh, systemExpiryClock{})
+}
 
-	// Iterate through channels from listeners goroutines
-	var entries map[string]*ServiceEntry
+type expiryTimer interface {
+	C() <-chan time.Time
+	Stop() bool
+	Reset(time.Duration) bool
+}
+
+type expiryClock interface {
+	Now() time.Time
+	NewTimer(time.Duration) expiryTimer
+}
+
+type systemExpiryClock struct{}
+
+func (systemExpiryClock) Now() time.Time { return time.Now() }
+func (systemExpiryClock) NewTimer(duration time.Duration) expiryTimer {
+	return systemExpiryTimer{timer: time.NewTimer(duration)}
+}
+
+type systemExpiryTimer struct{ timer *time.Timer }
+
+func (t systemExpiryTimer) C() <-chan time.Time        { return t.timer.C }
+func (t systemExpiryTimer) Stop() bool                 { return t.timer.Stop() }
+func (t systemExpiryTimer) Reset(d time.Duration) bool { return t.timer.Reset(d) }
+
+func (c *client) mainloopWithMessages(ctx context.Context, params *lookupParams, msgCh <-chan *dns.Msg, clock expiryClock) {
 	sentEntries := make(map[string]*ServiceEntry)
+	var timer expiryTimer
+	var timerC <-chan time.Time
+	defer params.done()
+	defer c.shutdown()
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 
-	ticker := time.NewTicker(cleanupFreq)
-	defer ticker.Stop()
+	stopTimer := func() {
+		if timer == nil || timer.Stop() {
+			return
+		}
+		select {
+		case <-timer.C():
+		default:
+		}
+	}
+	resetTimer := func() {
+		var earliest time.Time
+		for _, entry := range sentEntries {
+			if earliest.IsZero() || entry.Expiry.Before(earliest) {
+				earliest = entry.Expiry
+			}
+		}
+		if earliest.IsZero() {
+			stopTimer()
+			timerC = nil
+			return
+		}
+		delay := earliest.Sub(clock.Now())
+		if delay < 0 {
+			delay = 0
+		}
+		if timer == nil {
+			timer = clock.NewTimer(delay)
+		} else {
+			stopTimer()
+			timer.Reset(delay)
+		}
+		timerC = timer.C()
+	}
+	send := func(entry *ServiceEntry) bool {
+		select {
+		case params.Entries <- entry:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	expireEntries := func() bool {
+		now := clock.Now()
+		for key, entry := range sentEntries {
+			if entry.Expiry.After(now) {
+				continue
+			}
+			if c.unannouncements {
+				removed := cloneServiceEntry(entry)
+				removed.Removed = true
+				if !send(removed) {
+					return false
+				}
+			}
+			delete(sentEntries, key)
+		}
+		resetTimer()
+		return true
+	}
+
 	for {
+		var entries map[string]*ServiceEntry
 		var now time.Time
 		select {
 		case <-ctx.Done():
-			// Context expired. Notify subscriber that we are done here.
-			params.done()
-			c.shutdown()
 			return
-		case t := <-ticker.C:
-			for k, e := range sentEntries {
-				if t.After(e.Expiry) {
-					delete(sentEntries, k)
-				}
+		case <-timerC:
+			if !expireEntries() {
+				return
 			}
 			continue
-		case msg := <-msgCh:
-			// Probe authority and query known-answer records are not established answers.
+		case msg, ok := <-msgCh:
+			if !ok {
+				return
+			}
+			// Probe authority and query known answers are not established answers.
 			if !msg.Response {
 				continue
 			}
-			now = time.Now()
+			now = clock.Now()
 			entries = make(map[string]*ServiceEntry)
 			sections := append(msg.Answer, msg.Ns...)
 			sections = append(sections, msg.Extra...)
@@ -303,11 +392,17 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 			for k, e := range entries {
 				if !e.Expiry.After(now) {
 					delete(entries, k)
-					if _, sent := sentEntries[k]; sent && c.unannouncements {
-						e.Removed = true
-						params.Entries <- e
+					if sent, ok := sentEntries[k]; ok {
+						if c.unannouncements {
+							removed := cloneServiceEntry(sent)
+							removed.Expiry = e.Expiry
+							removed.Removed = true
+							if !send(removed) {
+								return
+							}
+						}
+						delete(sentEntries, k)
 					}
-					delete(sentEntries, k)
 					continue
 				}
 				if refreshCachedEntry(sentEntries, k, e) {
@@ -326,12 +421,15 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 				// Submit entry to subscriber and cache it.
 				// This is also a point to possibly stop probing actively for a
 				// service entry.
-				params.Entries <- cloneServiceEntry(e)
+				if !send(cloneServiceEntry(e)) {
+					return
+				}
 				sentEntries[k] = cloneServiceEntry(e)
 				if !params.isBrowsing {
 					params.disableProbing()
 				}
 			}
+			resetTimer()
 		}
 	}
 }
