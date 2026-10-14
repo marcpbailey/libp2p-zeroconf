@@ -318,8 +318,8 @@ func (c *client) mainloop(ctx context.Context, params *lookupParams) {
 				// Submit entry to subscriber and cache it.
 				// This is also a point to possibly stop probing actively for a
 				// service entry.
-				params.Entries <- e
-				sentEntries[k] = e
+				params.Entries <- cloneServiceEntry(e)
+				sentEntries[k] = cloneServiceEntry(e)
 				if !params.isBrowsing {
 					params.disableProbing()
 				}

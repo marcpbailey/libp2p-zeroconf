@@ -119,3 +119,36 @@ func newServiceEntry(instance, service string, domain string) *ServiceEntry {
 		ServiceRecord: *newServiceRecord(instance, service, domain),
 	}
 }
+
+// cloneServiceEntry separates resolver-owned state from subscriber snapshots.
+func cloneServiceEntry(entry *ServiceEntry) *ServiceEntry {
+	if entry == nil {
+		return nil
+	}
+	cloned := *entry
+	cloned.Subtypes = cloneStrings(entry.Subtypes)
+	cloned.Text = cloneStrings(entry.Text)
+	cloned.AddrIPv4 = cloneIPs(entry.AddrIPv4)
+	cloned.AddrIPv6 = cloneIPs(entry.AddrIPv6)
+	return &cloned
+}
+
+func cloneStrings(input []string) []string {
+	if input == nil {
+		return nil
+	}
+	cloned := make([]string, len(input))
+	copy(cloned, input)
+	return cloned
+}
+
+func cloneIPs(input []net.IP) []net.IP {
+	if input == nil {
+		return nil
+	}
+	cloned := make([]net.IP, len(input))
+	for index, address := range input {
+		cloned[index] = append(net.IP(nil), address...)
+	}
+	return cloned
+}
