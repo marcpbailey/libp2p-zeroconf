@@ -40,3 +40,26 @@ func TestForkCloneServiceEntryCopiesNestedMetadata(t *testing.T) {
 		t.Fatal("source aliases clone")
 	}
 }
+
+func TestForkChangedCachedEntryIsNotSuppressed(t *testing.T) {
+	original := &ServiceEntry{HostName: "old.local.", Port: 8080, Text: []string{"id=one"}, AddrIPv4: []net.IP{net.ParseIP("192.0.2.10")}, AddrIPv6: []net.IP{net.ParseIP("2001:db8::10")}, Expiry: time.Now().Add(time.Minute)}
+	for name, change := range map[string]func(*ServiceEntry){
+		"hostname": func(e *ServiceEntry) { e.HostName = "new.local." },
+		"port":     func(e *ServiceEntry) { e.Port = 8443 },
+		"txt":      func(e *ServiceEntry) { e.Text[0] = "id=two" },
+		"ipv4":     func(e *ServiceEntry) { e.AddrIPv4[0] = net.ParseIP("192.0.2.20") },
+		"ipv6":     func(e *ServiceEntry) { e.AddrIPv6[0] = net.ParseIP("2001:db8::20") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cached := cloneServiceEntry(original)
+			changed := cloneServiceEntry(original)
+			change(changed)
+			if refreshCachedEntry(map[string]*ServiceEntry{"service": cached}, "service", changed) {
+				t.Fatal("changed content suppressed")
+			}
+			if !sameService(original, cached) {
+				t.Fatal("change check mutated cache")
+			}
+		})
+	}
+}
