@@ -161,16 +161,13 @@ func TestSubtype(t *testing.T) {
 
 	t.Run("short ttl remains discoverable", func(t *testing.T) {
 		origTTL := defaultTTL
-		origCleanupFreq := cleanupFreq
 		origInitialQueryInterval := initialQueryInterval
 		t.Cleanup(func() {
 			defaultTTL = origTTL
-			cleanupFreq = origCleanupFreq
 			initialQueryInterval = origInitialQueryInterval
 		})
 		defaultTTL = 1 // 1 second
 		initialQueryInterval = 100 * time.Millisecond
-		cleanupFreq = 100 * time.Millisecond
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
