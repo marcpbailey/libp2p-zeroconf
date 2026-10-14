@@ -333,6 +333,9 @@ func refreshCachedEntry(sentEntries map[string]*ServiceEntry, key string, entry 
 	if !ok {
 		return false
 	}
+	if !sameService(cached, entry) {
+		return false
+	}
 	cached.Expiry = entry.Expiry
 	return true
 }

@@ -3,6 +3,7 @@ package zeroconf
 import (
 	"fmt"
 	"net"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -151,4 +152,11 @@ func cloneIPs(input []net.IP) []net.IP {
 		cloned[index] = append(net.IP(nil), address...)
 	}
 	return cloned
+}
+
+// sameService compares content while allowing quiet TTL renewal.
+func sameService(a, b *ServiceEntry) bool {
+	left, right := *a, *b
+	left.Expiry, right.Expiry = time.Time{}, time.Time{}
+	return reflect.DeepEqual(left, right)
 }
