@@ -54,6 +54,10 @@ back to canonical indices and reject unknown mappings. The receiving link is
 preserved even when AAAA arrives in an IPv4 packet. Native Windows runtime
 validation remains required.
 
+This index distinction follows Go's
+[Go 1.21.13 Windows interface implementation](https://github.com/golang/go/blob/go1.21.13/src/net/interface_windows.go),
+which uses `IfIndex` with `Ipv6IfIndex` as a fallback.
+
 `Addresses` contains owned IP byte slices, each with its received positive-record
 TTL and effective absolute expiry. Duplicate addresses on a link are renewed
 rather than repeated. `NoData` contains independently expiring NSEC assertions
