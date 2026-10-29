@@ -387,3 +387,46 @@ func TestHostnameRetriesUseClientSchedule(t *testing.T) {
 		t.Fatalf("retry: %d, %v", calls, err)
 	}
 }
+
+func TestHostnameLateAndWrongPortAnswers(t *testing.T) {
+	ifaces := testMulticastIfaces(t)
+	wrongPort, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wrongPort.Close()
+	packets := ipv4.NewPacketConn(wrongPort)
+	if err := packets.SetMulticastLoopback(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := packets.SetMulticastTTL(255); err != nil {
+		t.Fatal(err)
+	}
+	sent := make(chan error, 1)
+	startHostnameResponder(t, ifaces, func(query *dns.Msg) *dns.Msg {
+		if len(query.Question) == 0 || query.Question[0].Name != "late.local." {
+			return nil
+		}
+		response := hostnameMessage(t, "late.local. 120 IN A 192.0.2.10")
+		wire, err := response.Pack()
+		if err == nil {
+			_, err = packets.WriteTo(wire, &ipv4.ControlMessage{IfIndex: ifaces[0].Index}, ipv4Addr)
+		}
+		sent <- err
+		// The valid-source reply arrives only after the collection window closed.
+		time.Sleep(150 * time.Millisecond)
+		return response
+	})
+	got, err := LookupHostname(context.Background(), HostnameQuery{Name: "late.local", Families: IPv4, Duration: 50 * time.Millisecond}, SelectIfaces(ifaces), SelectIPTraffic(IPv4))
+	if !errors.Is(err, ErrNoHostnameResponse) || len(got) != 0 {
+		t.Fatalf("wrong-port or late answer accepted: %+v, %v", got, err)
+	}
+	select {
+	case err := <-sent:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("controlled responder did not receive the query")
+	}
+}
