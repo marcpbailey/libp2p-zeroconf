@@ -199,6 +199,9 @@ func TestHostnameValidationAndCancellation(t *testing.T) {
 	if _, err := LookupHostname(context.Background(), HostnameQuery{Name: "host.local"}, func(o *clientOpts) { o.unicast = true }); err == nil {
 		t.Fatal("accepted unicast")
 	}
+	if _, err := LookupHostname(context.Background(), HostnameQuery{Name: "host.local"}, func(o *clientOpts) { o.resolvers = []string{"192.0.2.53"} }); err == nil {
+		t.Fatal("accepted explicit unicast resolvers")
+	}
 	if _, err := LookupHostname(context.Background(), HostnameQuery{Name: "host.local"}, Unannouncements()); err == nil {
 		t.Fatal("accepted subscription removal option")
 	}

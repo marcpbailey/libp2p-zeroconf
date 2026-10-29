@@ -73,7 +73,7 @@ func LookupHostname(ctx context.Context, query HostnameQuery, opts ...ClientOpti
 		return nil, err
 	}
 	conf := applyOpts(opts...)
-	if conf.unicast || conf.unannouncements {
+	if conf.unicast || len(conf.resolvers) != 0 || conf.unannouncements {
 		return nil, fmt.Errorf("hostname lookup supports multicast one-shot options only")
 	}
 	if conf.listenOn == 0 || conf.listenOn & ^IPType(IPv4AndIPv6) != 0 {
