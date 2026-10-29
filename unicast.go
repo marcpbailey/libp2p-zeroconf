@@ -439,6 +439,9 @@ func exchangeDNS(ctx context.Context, message *dns.Msg, address, network string)
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
+	if deadline, ok := ctx.Deadline(); err != nil && ok && !time.Now().Before(deadline) {
+		return nil, context.DeadlineExceeded
+	}
 	return response, err
 }
 

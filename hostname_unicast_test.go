@@ -261,6 +261,29 @@ func TestHostnameUnicastConcurrentCalls(t *testing.T) {
 	}
 }
 
+// Model a context timer whose notification is delayed after its deadline. The
+// socket deadline can fire first on a busy host without changing the API error.
+type delayedHostnameDeadline struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c delayedHostnameDeadline) Deadline() (time.Time, bool) { return c.deadline, true }
+
+func TestHostnameDNSDeadlineBeforeContextNotification(t *testing.T) {
+	s := startDNSServer(t)
+	s.mu.Lock()
+	s.silent = true
+	s.mu.Unlock()
+	ctx := delayedHostnameDeadline{Context: context.Background(), deadline: time.Now().Add(20 * time.Millisecond)}
+	message := new(dns.Msg)
+	message.SetQuestion(testHost, dns.TypeA)
+	_, err := exchangeDNS(ctx, message, s.address, "udp")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline without context notification: %v", err)
+	}
+}
+
 func TestHostnameUnicastAliasesInOnePacket(t *testing.T) {
 	m := &dns.Msg{MsgHdr: dns.MsgHdr{Response: true}}
 	m.SetQuestion(testHost, dns.TypeA)
