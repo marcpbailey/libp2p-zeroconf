@@ -1,142 +1,167 @@
-# One-shot mDNS hostname lookup
+# Hostname resolution
 
 `LookupHostname(ctx, HostnameQuery, ...ClientOption) ([]HostnameResult, error)`
-queries a hostname independently of DNS-SD. It sends direct A and/or AAAA
-questions, reusing the existing client socket setup, DNS decoder, multicast send
-path, retry scheduler and shutdown. Platform packet operations are shared with
-registration, including Windows adapter-index conversion. No service records are
-created or required, and no process-wide cache or subscription is introduced.
+resolves A/AAAA records independently of DNS-SD. No service instance, PTR, SRV or
+TXT record is required. It provides automatic transport selection and explicit
+controls, reusing the existing multicast client and unicast DNS machinery.
 
-## Request and completion
+## Names and transport selection
 
-`HostnameQuery.Name` must be an ASCII DNS hostname below `.local`, with letters,
-digits and interior hyphens in each label. Multi-label names are supported. The
-optional final dot and ASCII case are normalized. Bare names, the `.local` apex,
-other domains, escapes and malformed labels are rejected before opening sockets.
+The name must be an ASCII DNS hostname with at least two labels. The optional
+final dot and ASCII case are normalized. Labels contain letters, digits and
+interior hyphens. Bare names, escapes, IP literals and malformed labels are
+rejected. Names are queried as absolute names; no search suffix is appended.
 
-`Families` selects address record types. Zero defaults to `IPv4AndIPv6`.
-`SelectIPTraffic` independently selects the packet transports. For example,
-`Families: IPv6` with `SelectIPTraffic(IPv4)` asks for AAAA over IPv4 multicast.
+`HostnameQuery.Transport` selects the policy:
 
-`Duration` is the collection window after transport setup, defaulting to one
-second. Negative durations are rejected. The entire window is used, including
-after a positive or negative answer, to collect split packets and independent
-links. A longer window reuses the service client's initial four-second retry
-interval and exponential backoff with jitter, capped at sixty seconds. There is
-no final DNS-SD lookup or system-resolver fallback. The default one-second window
-sends one query; increase it if retries are needed on a lossy network.
+| Value | Behaviour |
+| --- | --- |
+| `HostnameAuto` (zero/default) | `.local` uses multicast. Other names use configured unicast DNS. |
+| `HostnameMulticast` | Force multicast, including for non-`.local` names. |
+| `HostnameUnicast` | Force unicast DNS. |
 
-The lookup stops accepting packets when the collection window ends or its
-context is canceled, whichever happens first. It cancels its workers, closes both
-transport sockets and waits for its send/receive goroutines before returning.
-The context also applies to setup to the extent supported by local socket calls;
-these calls are not independently interruptible. Each concurrent call owns its
-sockets, timer and answer state. No answer is shared between calls or retained
-after return.
+`UnicastDNS()` also explicitly selects unicast and uses configured system DNS
+servers. `UnicastDNS("192.0.2.53:53")` selects an explicit resolver. Resolver
+addresses, platform configuration sources and their limitations follow
+[the existing unicast implementation](UNICAST.md#resolver-configuration).
+Combining `HostnameMulticast` with `UnicastDNS` is an error.
 
-## Results and errors
+```go
+// Automatic multicast.
+results, err := zeroconf.LookupHostname(ctx,
+    zeroconf.HostnameQuery{Name: "api.dev.example.local."})
 
-Each `HostnameResult` belongs to one receiving interface, identified by its
-canonical `net.Interface` index. Same-named hosts from different links remain
-separate, even if their address bytes match. Unselected interfaces and packets
-without a usable interface index are ignored. No interface is guessed, including
-when only one was selected. An explicit interface without a usable selected
-transport fails setup. Automatic selection skips loopback, point-to-point and
-addressless interfaces. Every retained link must have at least one working
-selected transport. A missing IPv6 packet transport does not prevent collecting
-AAAA answers over IPv4.
+// Automatic configured DNS, including private DNS domains.
+results, err = zeroconf.LookupHostname(ctx,
+    zeroconf.HostnameQuery{Name: "api.example.com."})
 
-Resolve the canonical interface index into the appropriate platform IPv6 zone
-before using a link-local address. Windows has separate IPv4 and IPv6 adapter
-indices: a canonical `net.Interface.Index` must not be assumed to be the native
-IPv6 scope identifier. The packet helpers convert received native IPv6 indices
-back to canonical indices and reject unknown mappings. The receiving link is
-preserved even when AAAA arrives in an IPv4 packet. Native Windows runtime
-validation remains required.
+// Explicit multicast for a non-.local name.
+results, err = zeroconf.LookupHostname(ctx,
+    zeroconf.HostnameQuery{Name: "api.example.com.", Transport: zeroconf.HostnameMulticast})
 
-This index distinction follows Go's
-[Go 1.21.13 Windows interface implementation](https://github.com/golang/go/blob/go1.21.13/src/net/interface_windows.go),
-which uses `IfIndex` with `Ipv6IfIndex` as a fallback.
+// Explicit DNS server, useful for diagnostics and controlled tests.
+results, err = zeroconf.LookupHostname(ctx,
+    zeroconf.HostnameQuery{Name: "api.example.com."}, zeroconf.UnicastDNS("192.0.2.53:53"))
+```
 
-`Addresses` contains owned IP byte slices, each with its received positive-record
-TTL and effective absolute expiry. Duplicate addresses on a link are renewed
-rather than repeated. `NoData` contains independently expiring NSEC assertions
-for the requested address families. A family missing from both lists remains
-unknown. An unanswered link remains unknown and has no result. Ordering is
-stable by interface index and address text, then negative address family.
+Automatic selection never retries a failed `.local` multicast query through
+unicast DNS, or a failed ordinary DNS query through multicast. A forced unicast
+lookup of `.local` is an explicit caller override. DNS CNAME chains stay within
+the selected transport; an automatic unicast lookup rejects a CNAME into `.local`
+instead of leaking a new `.local` question to DNS or inventing a cross-transport
+result. Callers can explicitly query that target through multicast.
 
-* A nil error means at least one live address or explicit NSEC negative was
-  collected. It does not mean every family or selected link answered.
-* `ErrNoHostnameResponse` means the collection window ended without a live
-  requested address or negative answer. This includes silence and records that
-  expired within the window. It is never an authoritative NXDOMAIN result.
-* A context deadline or cancellation returns `context.DeadlineExceeded` or
-  `context.Canceled`, even when partial results are available.
-* Socket setup, send and receive failures return errors. Any live results already
-  collected accompany an error during collection. Context errors take precedence
-  when cancellation and a socket error coincide.
+This is hostname resolution through DNS and mDNS, not a replacement for the OS
+resolver. It does not implement hosts-file lookup, NSS, DNS search lists, NRPT or
+all interface-specific VPN resolver policy. It does not call `net.LookupHost` as
+a hidden substitute. Command behaviour and application-specific naming belong in
+callers rather than this API.
 
-Use the returned error and the records together. A complete IPv4 answer plus
-silence for AAAA is a partial dual-stack result, not proof of IPv6 absence. A
-result containing only `NoData` is an explicit negative result for those families
-on that link, not proof that the hostname is absent everywhere. The results are
-snapshots; callers must respect `Expiry`, particularly when goodbye/cache-flush
-processing shortened it below the original TTL.
+## Families, interfaces and results
 
-## Packet and lifetime policy
+`Families` selects address record types: `IPv4`, `IPv6` or `IPv4AndIPv6` (the zero
+value defaults to both). This is independent of the IP family carrying a packet.
+For multicast, `SelectIPTraffic(IPv4)` can carry questions and answers for both A
+and AAAA. Unicast uses the configured resolver addresses' packet families;
+non-default `SelectIPTraffic` and `SelectIfaces` are rejected there because this
+implementation does not bind ordinary DNS exchanges to selected interfaces.
 
-The authority is [RFC 6762](https://www.rfc-editor.org/rfc/rfc6762), especially
-sections 6, 6.1, 6.2, 10.1, 10.2 and 18. Only successful authoritative QUERY
-responses from the configured mDNS source port contribute IN-class records.
-The cache-flush bit is masked from the class. Matching A/AAAA records are read
-from answer and additional sections, never query proposals or authority data.
-Unrelated names, inappropriate flags/classes, malformed packets, unspecified or
-multicast addresses, and IPv4-mapped AAAA values are ignored. Names use DNS ASCII
-case comparison with final-dot normalization. CNAME chasing is not supported.
+Each result identifies its actual `Transport`. Multicast results remain separate
+by canonical receiving `InterfaceIndex`; same-named hosts on different links are
+never combined. Unicast results have index zero, without a guessed link scope.
+Unusable, multicast and unspecified addresses are rejected. Unicast link-local
+addresses are also rejected because the DNS answer supplies no receiving-link
+scope. IPv4-mapped AAAA records are rejected.
 
-NSEC bitmaps supply no-data only for requested families whose types are absent.
-The next-domain field is ignored as required by section 6.1. Conventional
-DNSSEC-style NSEC records with the NSEC bit set are ignored. Positive records in
-the same packet take precedence over a contradictory bitmap. Positive answers
-replace earlier negative state; a negative received after a positive shortens
-the positive's remaining lifetime to at most one second. Until that positive
-expires, it takes precedence in the returned snapshot.
+For multicast, packets without a usable interface index or from unselected
+interfaces are ignored. Explicit interfaces must have a working selected packet
+transport. Automatic selection skips loopback, point-to-point and addressless
+interfaces. Resolve the canonical interface index to the appropriate native IPv6
+zone before using a link-local address. Go's
+[Go 1.21.13 Windows interface implementation](https://github.com/golang/go/blob/go1.21.13/src/net/interface_windows.go)
+uses `IfIndex` with `Ipv6IfIndex` as a fallback; native IPv6 indices can differ.
+Existing packet helpers perform the receive/send index conversion.
 
-Each positive and negative record expires separately. A goodbye shortens an
-existing matching record to at most one second, without creating a new result.
-Cache-flush address records shorten older same-family records on that link to at
-most one second; records received in the last second are protected, allowing
-split RRSets. Reannouncements can rescue a goodbye or pending flush. Expired
-records are omitted. Changes after the lookup ends cannot update its snapshot.
+Each `HostnameAddress` has the address record owner's `Name`, owned `IP` bytes,
+received `TTL` and effective `Expiry`. The owner can be a CNAME target. Addresses
+are deduplicated and sorted. Unicast CNAME lifetimes can shorten the effective
+expiry below the address record TTL. Zero-TTL unicast answers are usable only for
+the current lookup and must not be cached. Other returned snapshots may expire
+while another family is completing; callers must respect `Expiry`.
 
-`Unannouncements` is rejected because this API is not a subscription. The
-`UnicastDNS` option, when present in a combined build, is also rejected. Unicast
-hostname resolution is deferred and does not create a dependency on that feature.
-`.local` lookups always use multicast; no public DNS request is substituted.
+`NoData` contains per-family explicit negative assertions. Multicast uses NSEC;
+unicast requires an applicable SOA and follows the smaller SOA TTL/MINIMUM.
+`NXDOMAIN` distinguishes that DNS response from NODATA. A negative for one family
+never suppresses the other family's addresses. Missing multicast families or
+silent links remain unknown. Unicast failures do not become negative answers.
 
-## Tests
+## Completion and errors
 
-Normal tests use the existing multicast test destination and ephemeral test port,
-never the native mDNS port or this computer's hostname. Deterministic encoded
-packet tests cover family selection, split records, interface separation,
-deduplication, renewal, expiry, negatives and removal. Controlled multicast tests
-exercise the public API, concurrent calls and transport cleanup without service
-advertisements. Registration and DNS-SD behavior remain covered by their existing
-tests and [RFC 6763](https://www.rfc-editor.org/rfc/rfc6763) requirements.
+`Duration` defaults to one second and must not be negative:
 
-The optional macOS test registers only two synthetic address records through
-Bonjour's `DNSServiceCreateConnection` and `DNSServiceRegisterRecord` APIs. It
-waits for startup announcements to finish, then performs a fresh independent
-hostname lookup. The connection is removed when its helper exits. Explicitly
-select an interface and run only this test:
+* Multicast uses the entire duration after transport setup to collect split
+  packets and separate links. Longer windows reuse the service client's initial
+  four-second retry interval and exponential backoff with jitter, capped at sixty
+  seconds. The default window sends one query.
+* Unicast uses the duration as a maximum, including resolver configuration. A and
+  AAAA run independently and return when all requested families have finished.
+  Exchanges reuse EDNS negotiation, truncated-UDP TCP fallback, configured-server
+  failover and a two-second per-server maximum within the overall deadline.
+
+Nil error means successful protocol results, which may contain only explicit
+negatives. Inspect addresses and `NoData` together. `ErrNoHostnameResponse` means a
+multicast window ended without a live requested address or negative answer; it
+is never NXDOMAIN. Unicast silence, malformed/incomplete replies and SERVFAIL are
+errors. Query or context deadlines return `context.DeadlineExceeded`.
+Cancellation returns `context.Canceled`. Errors retain available partial results.
+
+Both paths close their sockets and wait for their workers before returning.
+Each call owns its results and may run concurrently with other calls. There is no
+new shared cache or subscription. `Unannouncements` is rejected. Local socket
+setup is not independently interruptible; the context applies where the existing
+transport/configuration calls support it.
+
+## Protocol and equivalence
+
+Multicast processing follows [RFC 6762](https://www.rfc-editor.org/rfc/rfc6762):
+accept successful authoritative QUERY responses from the configured mDNS source
+port, validate IN class after masking cache-flush, and read matching addresses
+from answer/additional sections. Query proposals and authority data cannot become
+hostname results. NSEC ignores the next-domain field as section 6.1 requires;
+DNSSEC-style NSEC with the NSEC bit set is ignored. Goodbye and cache-flush use the
+one-second grace period, including protection for recently received split RRSets.
+Each record expires independently. Positive answers take precedence during a
+negative grace period. Changes after return cannot update the snapshot.
+
+The API is guided by Bonjour's
+[DNSServiceGetAddrInfo](https://github.com/apple-oss-distributions/mDNSResponder/blob/d4658af3f5f291311c6aee4210aa6d39bda82bbe/mDNSShared/dns_sd.h)
+and Avahi's
+[hostname resolver and transport selection](https://github.com/avahi/avahi/blob/02ac280d038dd66a45165d82421cfb8fcbca3bcd/avahi-core/browse.c).
+Both provide hostname operations and transport controls. This library deliberately
+provides a one-shot result rather than claiming identical subscription semantics.
+Its automatic policy follows `.local` multicast/other configured DNS; unlike
+Avahi's no-wide-area case, ordinary DNS failures do not select multicast.
+Existing `Browse` and service `Lookup` retain their explicit opt-in unicast
+contract. DNS-SD service target alias restrictions remain unchanged.
+
+## Verification
+
+Normal multicast tests use an ephemeral test port and synthetic names, never the
+native mDNS port or this computer's hostname. Unicast tests use controlled
+loopback DNS servers. Packet and network tests cover routing, families,
+interfaces, split records, lifetimes, negatives, aliases, TCP/EDNS, failures,
+cancellation, concurrency and cleanup.
+
+The optional macOS test briefly registers only synthetic A/AAAA records through
+Bonjour's DNSServiceRegisterRecord API. It waits for startup announcements to
+finish before querying. Run only this test with an explicitly selected interface:
 
 ```sh
 ZEROCONF_INTEROP_INTERFACE=en0 go test -tags interop \
   -run '^TestNativeHostnameInterop$' -v -count=1 -timeout 25s
 ```
 
-This uses the real network and briefly publishes synthetic addresses. It requires
-permission for that test environment. It needs Python 3 and a running Bonjour
-daemon, but no desktop control, service restart, packet capture or administrator
-privileges. Cross-compilation is distinct from native execution. Avahi and native
-Windows validation must be reported separately when performed.
+It requires permission for that test network, Python 3 and a running Bonjour
+service. It needs no desktop control, service restart, packet capture or admin
+privileges. Native execution, cross-compilation and interoperability with Avahi or
+Bonjour must be reported separately.

@@ -181,7 +181,7 @@ func TestHostnameRecordLifetime(t *testing.T) {
 }
 
 func TestHostnameValidationAndCancellation(t *testing.T) {
-	for _, name := range []string{"", "local.", "example.com", "host..local", "host.local..", "bad name.local", "-bad.local", "bad_.local", "host\\046label.local"} {
+	for _, name := range []string{"", "local.", "printer", "host..local", "host.local..", "bad name.local", "-bad.local", "bad_.local", "host\\046label.local"} {
 		if _, err := normalizeHostnameQuery(HostnameQuery{Name: name}); err == nil {
 			t.Errorf("accepted %q", name)
 		}
@@ -195,9 +195,6 @@ func TestHostnameValidationAndCancellation(t *testing.T) {
 	cancel()
 	if _, err := LookupHostname(ctx, HostnameQuery{Name: "host.local"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel: %v", err)
-	}
-	if _, err := LookupHostname(context.Background(), HostnameQuery{Name: "host.local"}, func(o *clientOpts) { o.unicast = true }); err == nil {
-		t.Fatal("accepted unicast")
 	}
 	if _, err := LookupHostname(context.Background(), HostnameQuery{Name: "host.local"}, func(o *clientOpts) { o.resolvers = []string{"192.0.2.53"} }); err == nil {
 		t.Fatal("accepted explicit unicast resolvers")
@@ -254,7 +251,7 @@ func TestHostnameControlledMulticast(t *testing.T) {
 		}
 		name := query.Question[0].Name
 		m := new(dns.Msg)
-		if name != "single.local." && name != "api.dev.example.local." && name != "negative.local." {
+		if name != "single.local." && name != "api.dev.example.local." && name != "negative.local." && name != "forced.example.test." {
 			return nil
 		}
 		for _, q := range query.Question {
@@ -287,6 +284,10 @@ func TestHostnameControlledMulticast(t *testing.T) {
 				t.Fatalf("%s family %d: %+v", name, family, got)
 			}
 		}
+	}
+	forced, err := LookupHostname(context.Background(), HostnameQuery{Name: "forced.example.test", Transport: HostnameMulticast, Duration: 150 * time.Millisecond}, SelectIfaces(ifaces), SelectIPTraffic(IPv4))
+	if err != nil || len(forced) != 1 || forced[0].Transport != HostnameMulticast || len(forced[0].Addresses) != 2 {
+		t.Fatalf("forced multicast: %+v, %v", forced, err)
 	}
 	got, err := LookupHostname(context.Background(), HostnameQuery{Name: "negative.local", Families: IPv6, Duration: 150 * time.Millisecond}, SelectIfaces(ifaces), SelectIPTraffic(IPv4))
 	if err != nil || len(got) != 1 || len(got[0].NoData) != 1 || len(got[0].Addresses) != 0 {

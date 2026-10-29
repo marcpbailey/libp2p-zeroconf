@@ -15,55 +15,74 @@ import (
 
 // ErrNoHostnameResponse means no live requested address or NSEC negative answer
 // was collected. Silence is not an authoritative assertion that a name is absent.
-var ErrNoHostnameResponse = errors.New("no mDNS hostname response")
+var ErrNoHostnameResponse = errors.New("no hostname response")
 
-// HostnameQuery describes a one-shot multicast lookup. Name must be a DNS
-// hostname below .local, with an optional trailing dot. Families selects address
+// HostnameTransport selects how a hostname lookup is sent.
+type HostnameTransport uint8
+
+const (
+	// HostnameAuto uses multicast for .local and configured DNS for other names.
+	HostnameAuto HostnameTransport = iota
+	// HostnameMulticast forces multicast, including for non-.local names.
+	HostnameMulticast
+	// HostnameUnicast forces ordinary DNS using configured or explicit servers.
+	HostnameUnicast
+)
+
+// HostnameQuery describes a one-shot lookup. Name must be a fully qualified ASCII
+// DNS hostname with at least two labels and an optional trailing dot. Families selects address
 // records independently of SelectIPTraffic. Zero means both address families.
-// Duration is the full collection window, starting after transport setup. Zero
-// means one second. Longer windows reuse the service resolver's retry schedule.
+// Duration is the multicast collection window or unicast time limit. Zero means
+// one second. Longer multicast windows reuse the service resolver's retry schedule.
 type HostnameQuery struct {
-	Name     string
-	Families IPType
-	Duration time.Duration
+	Name      string
+	Families  IPType
+	Duration  time.Duration
+	Transport HostnameTransport
 }
 
 // HostnameAddress retains an address record's received TTL and effective expiry.
-// Expiry can be shortened by goodbye or cache-flush processing. The caller owns IP.
+// Expiry can be shortened by CNAME lifetimes, goodbye or cache-flush processing.
+// The caller owns IP.
 type HostnameAddress struct {
+	Name   string // Owner of the address record, including a resolved CNAME target.
 	IP     net.IP
 	TTL    uint32
 	Expiry time.Time
 }
 
-// HostnameNoData is an explicit NSEC assertion for one address family on one
-// link. An unanswered family has no such entry and remains unknown.
+// HostnameNoData is an explicit negative assertion for one address family:
+// NSEC on a multicast link, or SOA-backed NODATA/NXDOMAIN from unicast DNS.
+// An unanswered family has no such entry and remains unknown.
 type HostnameNoData struct {
-	Family IPType
-	TTL    uint32
-	Expiry time.Time
+	Family   IPType
+	TTL      uint32
+	Expiry   time.Time
+	NXDOMAIN bool // Unicast negative response asserts that the name does not exist.
 }
 
-// HostnameResult contains one link's independent answer. InterfaceIndex is the
+// HostnameResult identifies its transport. Multicast results contain one link's
+// independent answer; unicast results have InterfaceIndex zero. InterfaceIndex is the
 // canonical net.Interface index. Resolve it to the platform's IPv6 zone before
 // using a link-local address; Windows IPv4 and IPv6 adapter indices can differ.
 // Same-named hosts on different links are never combined. Results are snapshots,
 // not subscriptions; they have no validity guarantee beyond their record expiry.
 type HostnameResult struct {
 	Name           string
+	Transport      HostnameTransport
 	InterfaceIndex int
 	Addresses      []HostnameAddress
 	NoData         []HostnameNoData
 }
 
 // LookupHostname sends direct A/AAAA questions without DNS-SD service records.
-// It collects for the entire query duration and then closes all sockets and waits
-// for its workers. Nil error means at least one live address or explicit negative
-// answer, not that every family or every link answered. Silence on other links
-// and missing families remain unknown. Cancellation, context deadline and I/O
-// failure return their error together with any live partial results. Calls are
-// independent and may run concurrently. UnicastDNS and Unannouncements are not
-// supported; no system resolver or public DNS fallback is used.
+// Auto uses multicast for .local and configured DNS for other fully qualified
+// names. Transport and UnicastDNS provide explicit overrides; no failure causes
+// automatic fallback to another transport. Multicast collects for Duration;
+// unicast returns when all requested families finish, within Duration. Both wait
+// for their workers and close their sockets before returning. Errors retain
+// partial results. Calls are independent and may run concurrently. Unannouncements
+// is unsupported; no hosts-file or search-domain policy is implemented.
 func LookupHostname(ctx context.Context, query HostnameQuery, opts ...ClientOption) ([]HostnameResult, error) {
 	query, err := normalizeHostnameQuery(query)
 	if err != nil {
@@ -73,8 +92,18 @@ func LookupHostname(ctx context.Context, query HostnameQuery, opts ...ClientOpti
 		return nil, err
 	}
 	conf := applyOpts(opts...)
-	if conf.unicast || len(conf.resolvers) != 0 || conf.unannouncements {
-		return nil, fmt.Errorf("hostname lookup supports multicast one-shot options only")
+	if conf.unannouncements || len(conf.resolvers) != 0 && !conf.unicast {
+		return nil, fmt.Errorf("invalid one-shot hostname options")
+	}
+	transport, err := hostnameLookupTransport(query, conf)
+	if err != nil {
+		return nil, err
+	}
+	if transport == HostnameUnicast {
+		if len(conf.ifaces) != 0 || conf.listenOn != IPv4AndIPv6 {
+			return nil, fmt.Errorf("interface and IP traffic selection apply only to multicast hostname lookup")
+		}
+		return lookupUnicastHostname(ctx, query, conf)
 	}
 	if conf.listenOn == 0 || conf.listenOn & ^IPType(IPv4AndIPv6) != 0 {
 		return nil, fmt.Errorf("invalid mDNS traffic selection %d", conf.listenOn)
@@ -90,8 +119,8 @@ func LookupHostname(ctx context.Context, query HostnameQuery, opts ...ClientOpti
 func normalizeHostnameQuery(q HostnameQuery) (HostnameQuery, error) {
 	q.Name = dns.CanonicalName(q.Name)
 	labels := strings.Split(strings.TrimSuffix(q.Name, "."), ".")
-	if _, ok := dns.IsDomainName(q.Name); !ok || len(labels) < 2 || labels[len(labels)-1] != "local" {
-		return q, fmt.Errorf("hostname must be below .local")
+	if _, ok := dns.IsDomainName(q.Name); !ok || len(labels) < 2 {
+		return q, fmt.Errorf("a fully qualified hostname with at least two labels is required")
 	}
 	for _, label := range labels {
 		if len(label) == 0 || label[0] == '-' || label[len(label)-1] == '-' {
@@ -115,7 +144,26 @@ func normalizeHostnameQuery(q HostnameQuery) (HostnameQuery, error) {
 	if q.Duration == 0 {
 		q.Duration = time.Second
 	}
+	if q.Transport > HostnameUnicast {
+		return q, fmt.Errorf("invalid hostname transport %d", q.Transport)
+	}
 	return q, nil
+}
+
+func hostnameLookupTransport(q HostnameQuery, conf clientOpts) (HostnameTransport, error) {
+	if conf.unicast {
+		if q.Transport == HostnameMulticast {
+			return 0, fmt.Errorf("UnicastDNS conflicts with multicast hostname transport")
+		}
+		return HostnameUnicast, nil
+	}
+	if q.Transport != HostnameAuto {
+		return q.Transport, nil
+	}
+	if dns.IsSubDomain("local.", q.Name) {
+		return HostnameMulticast, nil
+	}
+	return HostnameUnicast, nil
 }
 
 func hostnameQuestion(q HostnameQuery) *dns.Msg {
@@ -364,13 +412,13 @@ func (a *hostnameAnswers) snapshot(now time.Time) []HostnameResult {
 		}
 		link := links[key.index]
 		if link == nil {
-			link = &HostnameResult{Name: a.query.Name, InterfaceIndex: key.index}
+			link = &HostnameResult{Name: a.query.Name, Transport: HostnameMulticast, InterfaceIndex: key.index}
 			links[key.index] = link
 		}
 		if key.address == "" {
-			link.NoData = append(link.NoData, HostnameNoData{key.family, record.ttl, record.expiry})
+			link.NoData = append(link.NoData, HostnameNoData{Family: key.family, TTL: record.ttl, Expiry: record.expiry})
 		} else {
-			link.Addresses = append(link.Addresses, HostnameAddress{append(net.IP(nil), record.ip...), record.ttl, record.expiry})
+			link.Addresses = append(link.Addresses, HostnameAddress{Name: a.query.Name, IP: append(net.IP(nil), record.ip...), TTL: record.ttl, Expiry: record.expiry})
 		}
 	}
 	var results []HostnameResult

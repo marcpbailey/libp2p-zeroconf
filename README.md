@@ -71,8 +71,10 @@ results, err := zeroconf.LookupHostname(ctx, zeroconf.HostnameQuery{
 ```
 
 This sends A and AAAA questions over IPv4 multicast without requiring a service
-instance, PTR, SRV or TXT record. See [hostname lookup](HOSTNAME_LOOKUP.md) for
-completion, partial results, TTLs, interface scoping and error semantics.
+instance, PTR, SRV or TXT record. Other fully qualified names use configured DNS
+automatically. Use `HostnameQuery.Transport` to force multicast or unicast, or
+`UnicastDNS(...)` to select DNS servers. See [hostname lookup](HOSTNAME_LOOKUP.md)
+for transport controls, completion, partial results, TTLs and interface scoping.
 
 ## Register a service
 
