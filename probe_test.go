@@ -19,7 +19,7 @@ func TestTentativeRegistrationDoesNotAnswer(t *testing.T) {
 	e := newServiceEntry("test", "_test._tcp", "local.")
 	e.HostName = "test.local."
 	e.Port = 8000
-	s := &Server{service: e, ttl: 120}
+	s := &Server{service: e, ttl: 120, hostTTL: defaultHostTTL}
 	q := dns.Question{Name: e.ServiceInstanceName(), Qtype: dns.TypeANY, Qclass: dns.ClassINET}
 	var reply dns.Msg
 	if err := s.handleQuestion(q, &reply, &dns.Msg{}, 1); err != nil {
@@ -37,7 +37,8 @@ func protocolServer(t *testing.T) (*Server, *[]dns.Msg) {
 	e.Port = 8000
 	e.Text = []string{"v=1"}
 	e.AddrIPv4 = []net.IP{net.ParseIP("192.0.2.10"), net.ParseIP("192.0.2.11")}
-	s := &Server{service: e, ttl: 120, ifaces: []net.Interface{{Index: 1}},
+	conf := applyServerOpts()
+	s := &Server{service: e, ttl: conf.ttl, hostTTL: conf.hostTTL, ifaces: []net.Interface{{Index: 1}},
 		ready: make(chan struct{}), done: make(chan struct{}), wake: make(chan struct{}, 1), shouldShutdown: make(chan struct{})}
 	s.unicastProbes = true
 	s.initProbes()
@@ -46,6 +47,77 @@ func protocolServer(t *testing.T) (*Server, *[]dns.Msg) {
 	s.probes[1].next = time.Unix(1, 0)
 	t.Cleanup(s.Shutdown)
 	return s, packets
+}
+
+func TestAutomaticProbeFailureDropsOnlyFailedInterface(t *testing.T) {
+	interfaces := []net.Interface{{Index: 1, Name: "failed"}, {Index: 2, Name: "working"}}
+	s := &Server{
+		ifaces:         interfaces,
+		automatic:      true,
+		ready:          make(chan struct{}),
+		done:           make(chan struct{}),
+		wake:           make(chan struct{}, 1),
+		shouldShutdown: make(chan struct{}),
+	}
+	s.unicastProbes = true
+	s.initProbes()
+	now := time.Unix(1, 0)
+	for _, p := range s.probes {
+		p.next = now
+	}
+	t.Cleanup(s.Shutdown)
+
+	routeErr := errors.New("no route to host")
+	sent := make(map[int]int)
+	s.send = func(_ *dns.Msg, index int) error {
+		sent[index]++
+		if index == 1 {
+			return routeErr
+		}
+		return nil
+	}
+
+	s.stepProbes(now)
+	if s.isShutdown {
+		t.Fatal("one automatic interface failure stopped the registration")
+	}
+	if _, ok := s.probes[1]; ok {
+		t.Fatal("failed automatic interface was retained")
+	}
+	if p := s.probes[2]; p == nil || p.sent != 1 || sent[2] != 1 {
+		t.Fatalf("working interface probe state = %#v, sends = %d", p, sent[2])
+	}
+}
+
+func TestExplicitProbeFailureStillStopsRegistration(t *testing.T) {
+	interfaces := []net.Interface{{Index: 1, Name: "selected"}, {Index: 2, Name: "other"}}
+	s := &Server{
+		ifaces:         interfaces,
+		ready:          make(chan struct{}),
+		done:           make(chan struct{}),
+		wake:           make(chan struct{}, 1),
+		shouldShutdown: make(chan struct{}),
+	}
+	s.unicastProbes = true
+	s.initProbes()
+	now := time.Unix(1, 0)
+	for _, p := range s.probes {
+		p.next = now
+	}
+	t.Cleanup(s.Shutdown)
+
+	selectedErr := errors.New("selected interface unavailable")
+	s.send = func(_ *dns.Msg, index int) error {
+		if index == 1 {
+			return selectedErr
+		}
+		return nil
+	}
+
+	s.stepProbes(now)
+	if !s.isShutdown || !errors.Is(s.terminalErr, selectedErr) {
+		t.Fatalf("explicit registration shutdown = %v, error = %v", s.isShutdown, s.terminalErr)
+	}
 }
 
 func establish(s *Server) {

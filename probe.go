@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"net"
 	"sort"
@@ -126,6 +127,35 @@ func (s *Server) sendMulticast(msg *dns.Msg, index int) error {
 	return s.multicastResponse(msg, index)
 }
 
+// dropFailedInterface keeps an automatically selected registration alive when
+// one candidate cannot send multicast packets. The caller holds s.mu.
+func (s *Server) dropFailedInterface(index int, err error) bool {
+	if !s.automatic || index == 0 {
+		return false
+	}
+	log.Printf("[zeroconf] dropping automatic mDNS interface %d after send failure: %v", index, err)
+	s.discardAutomaticInterface(index)
+	return len(s.probes) > 0
+}
+
+func (s *Server) discardAutomaticInterface(index int) {
+	delete(s.probes, index)
+	s.ifaces = removeInterface(s.ifaces, index)
+	s.ipv4Ifaces = removeInterface(s.ipv4Ifaces, index)
+	s.ipv6Ifaces = removeInterface(s.ipv6Ifaces, index)
+	delete(s.interfaceAddrs, index)
+}
+
+func removeInterface(interfaces []net.Interface, index int) []net.Interface {
+	result := interfaces[:0]
+	for _, iface := range interfaces {
+		if iface.Index != index {
+			result = append(result, iface)
+		}
+	}
+	return result
+}
+
 func sameMDNSName(a, b string) bool {
 	return strings.EqualFold(strings.TrimSuffix(a, "."), strings.TrimSuffix(b, "."))
 }
@@ -209,6 +239,9 @@ func (s *Server) stepProbes(now time.Time) time.Duration {
 			if !p.established {
 				if p.sent < probeCount {
 					if err := s.sendMulticast(s.probeMessage(index), index); err != nil {
+						if s.dropFailedInterface(index, err) {
+							continue
+						}
 						s.stopLocked(err)
 						return delay
 					}
@@ -218,6 +251,9 @@ func (s *Server) stepProbes(now time.Time) time.Duration {
 					p.established = true
 					p.announcements = 0
 					if err := s.announce(index, s.ttl); err != nil {
+						if s.dropFailedInterface(index, err) {
+							continue
+						}
 						s.stopLocked(err)
 						return delay
 					}
@@ -226,6 +262,9 @@ func (s *Server) stepProbes(now time.Time) time.Duration {
 				}
 			} else {
 				if err := s.announce(index, s.ttl); err != nil {
+					if s.dropFailedInterface(index, err) {
+						continue
+					}
 					s.stopLocked(err)
 					return delay
 				}
@@ -471,6 +510,9 @@ func (s *Server) observeResponse(msg *dns.Msg, index int, p *interfaceProbe, now
 	}
 	if refresh {
 		if err := s.announce(index, s.ttl); err != nil {
+			if s.dropFailedInterface(index, err) {
+				return nil
+			}
 			s.stopLocked(err)
 			return err
 		}

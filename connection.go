@@ -42,10 +42,11 @@ var (
 func joinUdp6Multicast(interfaces []net.Interface, requireAll ...bool) (*ipv6.PacketConn, error) {
 	multicastSocketMu.Lock()
 	defer multicastSocketMu.Unlock()
-	return joinUdp6MulticastLocked(interfaces, requireAll...)
+	conn, _, err := joinUdp6MulticastLocked(interfaces, requireAll...)
+	return conn, err
 }
 
-func joinUdp6MulticastLocked(interfaces []net.Interface, requireAll ...bool) (*ipv6.PacketConn, error) {
+func joinUdp6MulticastLocked(interfaces []net.Interface, requireAll ...bool) (*ipv6.PacketConn, []net.Interface, error) {
 	var udpConn *net.UDPConn
 	var err error
 	firstJoined := false
@@ -56,7 +57,7 @@ func joinUdp6MulticastLocked(interfaces []net.Interface, requireAll ...bool) (*i
 		udpConn, err = net.ListenUDP("udp6", mdnsWildcardAddrIPv6)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Join multicast groups to receive announcements
@@ -68,6 +69,10 @@ func joinUdp6MulticastLocked(interfaces []net.Interface, requireAll ...bool) (*i
 	}
 	// log.Println("Using multicast interfaces: ", interfaces)
 
+	joined := make([]net.Interface, 0, len(interfaces))
+	if firstJoined {
+		joined = append(joined, interfaces[0])
+	}
 	var failedJoins int
 	for index, iface := range interfaces {
 		if index == 0 && firstJoined {
@@ -76,26 +81,29 @@ func joinUdp6MulticastLocked(interfaces []net.Interface, requireAll ...bool) (*i
 		if err := pkConn.JoinGroup(&iface, &net.UDPAddr{IP: mdnsGroupIPv6}); err != nil {
 			// log.Println("Udp6 JoinGroup failed for iface ", iface)
 			failedJoins++
+		} else {
+			joined = append(joined, iface)
 		}
 	}
-	if failedJoins == len(interfaces) || (len(requireAll) > 0 && requireAll[0] && failedJoins > 0) {
+	if len(joined) == 0 || (len(requireAll) > 0 && requireAll[0] && failedJoins > 0) {
 		pkConn.Close()
-		return nil, fmt.Errorf("udp6: failed to join any of these interfaces: %v", interfaces)
+		return nil, nil, fmt.Errorf("udp6: failed to join any of these interfaces: %v", interfaces)
 	}
 
 	_ = pkConn.SetMulticastLoopback(true)
 	_ = pkConn.SetMulticastHopLimit(255)
 
-	return pkConn, nil
+	return pkConn, joined, nil
 }
 
 func joinUdp4Multicast(interfaces []net.Interface, requireAll ...bool) (*ipv4.PacketConn, error) {
 	multicastSocketMu.Lock()
 	defer multicastSocketMu.Unlock()
-	return joinUdp4MulticastLocked(interfaces, requireAll...)
+	conn, _, err := joinUdp4MulticastLocked(interfaces, requireAll...)
+	return conn, err
 }
 
-func joinUdp4MulticastLocked(interfaces []net.Interface, requireAll ...bool) (*ipv4.PacketConn, error) {
+func joinUdp4MulticastLocked(interfaces []net.Interface, requireAll ...bool) (*ipv4.PacketConn, []net.Interface, error) {
 	var udpConn *net.UDPConn
 	var err error
 	firstJoined := false
@@ -107,7 +115,7 @@ func joinUdp4MulticastLocked(interfaces []net.Interface, requireAll ...bool) (*i
 	}
 	if err != nil {
 		// log.Printf("[ERR] bonjour: Failed to bind to udp4 mutlicast: %v", err)
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Join multicast groups to receive announcements
@@ -119,6 +127,10 @@ func joinUdp4MulticastLocked(interfaces []net.Interface, requireAll ...bool) (*i
 	}
 	// log.Println("Using multicast interfaces: ", interfaces)
 
+	joined := make([]net.Interface, 0, len(interfaces))
+	if firstJoined {
+		joined = append(joined, interfaces[0])
+	}
 	var failedJoins int
 	for index, iface := range interfaces {
 		if index == 0 && firstJoined {
@@ -127,30 +139,49 @@ func joinUdp4MulticastLocked(interfaces []net.Interface, requireAll ...bool) (*i
 		if err := pkConn.JoinGroup(&iface, &net.UDPAddr{IP: mdnsGroupIPv4}); err != nil {
 			// log.Println("Udp4 JoinGroup failed for iface ", iface)
 			failedJoins++
+		} else {
+			joined = append(joined, iface)
 		}
 	}
-	if failedJoins == len(interfaces) || (len(requireAll) > 0 && requireAll[0] && failedJoins > 0) {
+	if len(joined) == 0 || (len(requireAll) > 0 && requireAll[0] && failedJoins > 0) {
 		pkConn.Close()
-		return nil, fmt.Errorf("udp4: failed to join any of these interfaces: %v", interfaces)
+		return nil, nil, fmt.Errorf("udp4: failed to join any of these interfaces: %v", interfaces)
 	}
 
 	_ = pkConn.SetMulticastLoopback(true)
 	_ = pkConn.SetMulticastTTL(255)
 
-	return pkConn, nil
+	return pkConn, joined, nil
 }
 
 func listMulticastInterfaces() []net.Interface {
-	var interfaces []net.Interface
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil
 	}
+	return eligibleMulticastInterfaces(ifaces, func(iface net.Interface) ([]net.Addr, error) {
+		return iface.Addrs()
+	})
+}
+
+func eligibleMulticastInterfaces(ifaces []net.Interface, addresses func(net.Interface) ([]net.Addr, error)) []net.Interface {
+	var interfaces []net.Interface
 	for _, ifi := range ifaces {
 		if (ifi.Flags & net.FlagUp) == 0 {
 			continue
 		}
-		if (ifi.Flags & net.FlagMulticast) > 0 {
+		if (ifi.Flags & (net.FlagLoopback | net.FlagPointToPoint)) != 0 {
+			continue
+		}
+		if (ifi.Flags & net.FlagMulticast) == 0 {
+			continue
+		}
+		addrs, err := addresses(ifi)
+		if err != nil {
+			continue
+		}
+		ipv4, ipv6 := interfaceFamilies(addrs)
+		if ipv4 || ipv6 {
 			interfaces = append(interfaces, ifi)
 		}
 	}

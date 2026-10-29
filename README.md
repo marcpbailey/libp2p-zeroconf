@@ -78,6 +78,9 @@ for transport controls, completion, partial results, TTLs and interface scoping.
 
 ## Register a service
 
+For hostname addresses without a service, use
+[standalone hostname registration](HOSTNAME-REGISTRATION.md).
+
 `Register` and `RegisterProxy` return after transport setup and start probing asynchronously.
 Call `server.WaitForReady(ctx)` to wait for the initial establishment result. Canceling
 that context only stops waiting; use `Shutdown` to stop the registration. The initial

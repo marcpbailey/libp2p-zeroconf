@@ -20,16 +20,22 @@ const (
 	multicastRepetitions = 2
 )
 
-var defaultTTL uint32 = 3200
+const (
+	defaultHostTTL    uint32 = 120
+	defaultServiceTTL uint32 = 4500
+)
 
 type serverOpts struct {
-	ttl uint32
+	ttl       uint32
+	hostTTL   uint32
+	automatic bool
 }
 
 func applyServerOpts(options ...ServerOption) serverOpts {
 	// Apply default configuration and load supplied options.
 	var conf = serverOpts{
-		ttl: defaultTTL,
+		ttl:     defaultServiceTTL,
+		hostTTL: defaultHostTTL,
 	}
 	for _, o := range options {
 		if o != nil {
@@ -42,10 +48,12 @@ func applyServerOpts(options ...ServerOption) serverOpts {
 // ServerOption fills the option struct.
 type ServerOption func(*serverOpts)
 
-// TTL sets the TTL for DNS replies.
+// TTL sets the TTL for all records created by a registration, including
+// service records and host address records.
 func TTL(ttl uint32) ServerOption {
 	return func(o *serverOpts) {
 		o.ttl = ttl
+		o.hostTTL = ttl
 	}
 }
 
@@ -81,7 +89,8 @@ func Register(instance, service, domain string, port int, text []string, ifaces 
 		entry.HostName = fmt.Sprintf("%s.%s.", trimDot(entry.HostName), trimDot(entry.Domain))
 	}
 
-	if len(ifaces) == 0 {
+	automatic := len(ifaces) == 0
+	if automatic {
 		ifaces = listMulticastInterfaces()
 	}
 
@@ -95,7 +104,9 @@ func Register(instance, service, domain string, port int, text []string, ifaces 
 		return nil, fmt.Errorf("could not determine host IP addresses")
 	}
 
-	s, err := newServer(ifaces, applyServerOpts(opts...))
+	serverOpts := applyServerOpts(opts...)
+	serverOpts.automatic = automatic
+	s, err := newServer(ifaces, serverOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -152,11 +163,14 @@ func RegisterProxy(instance, service, domain string, port int, host string, ips 
 		}
 	}
 
-	if len(ifaces) == 0 {
+	automatic := len(ifaces) == 0
+	if automatic {
 		ifaces = listMulticastInterfaces()
 	}
 
-	s, err := newServer(ifaces, applyServerOpts(opts...))
+	serverOpts := applyServerOpts(opts...)
+	serverOpts.automatic = automatic
+	s, err := newServer(ifaces, serverOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -174,6 +188,7 @@ const (
 // Server structure encapsulates both IPv4/IPv6 UDP connections
 type Server struct {
 	service    *ServiceEntry
+	hostname   *hostnameRegistration
 	ipv4conn   *ipv4.PacketConn
 	ipv6conn   *ipv6.PacketConn
 	ifaces     []net.Interface
@@ -184,6 +199,7 @@ type Server struct {
 	refCount       sync.WaitGroup
 	isShutdown     bool
 	ttl            uint32
+	hostTTL        uint32
 
 	mu             sync.Mutex
 	interfaceAddrs map[int][]net.IP
@@ -197,6 +213,31 @@ type Server struct {
 	send           func(*dns.Msg, int) error
 	unicastProbes  bool
 	ipv6IfIndexes  map[int]int
+	automatic      bool
+}
+
+func interfacesWithTransport(candidates, ipv4Ifaces, ipv6Ifaces []net.Interface) []net.Interface {
+	var interfaces []net.Interface
+	for _, iface := range candidates {
+		if hasInterface(ipv4Ifaces, iface.Index) || hasInterface(ipv6Ifaces, iface.Index) {
+			interfaces = append(interfaces, iface)
+		}
+	}
+	return interfaces
+}
+
+func canonicalJoinedInterfaces(joined, candidates []net.Interface, indexes map[int]int) []net.Interface {
+	var interfaces []net.Interface
+	for _, native := range joined {
+		index := canonicalIPv6Index(native.Index, indexes)
+		for _, candidate := range candidates {
+			if candidate.Index == index {
+				interfaces = append(interfaces, candidate)
+				break
+			}
+		}
+	}
+	return interfaces
 }
 
 // Constructs server structure
@@ -219,14 +260,16 @@ func newServer(ifaces []net.Interface, opts serverOpts) (*Server, error) {
 	defer multicastSocketMu.Unlock()
 	unicastProbes := canReceiveUnicastProbes()
 	var ipv4conn *ipv4.PacketConn
+	var joined4 []net.Interface
 	err4 := fmt.Errorf("no IPv4 addresses on selected interfaces")
 	if len(ifaces4) > 0 {
-		ipv4conn, err4 = joinUdp4MulticastLocked(ifaces4, true)
+		ipv4conn, joined4, err4 = joinUdp4MulticastLocked(ifaces4, !opts.automatic)
 	}
 	if err4 == nil {
 		if err4 = preparePacket4(ipv4conn); err4 != nil {
 			ipv4conn.Close()
 			ipv4conn = nil
+			joined4 = nil
 		}
 	}
 	if err4 != nil {
@@ -234,32 +277,53 @@ func newServer(ifaces []net.Interface, opts serverOpts) (*Server, error) {
 	}
 	var ipv6conn *ipv6.PacketConn
 	var ipv6Indexes map[int]int
+	var joined6 []net.Interface
 	err6 := fmt.Errorf("no IPv6 addresses on selected interfaces")
 	if len(ifaces6) > 0 {
 		var nativeIfaces []net.Interface
 		nativeIfaces, ipv6Indexes, err6 = nativeIPv6Interfaces(ifaces6)
 		if err6 == nil {
-			ipv6conn, err6 = joinUdp6MulticastLocked(nativeIfaces, true)
+			ipv6conn, joined6, err6 = joinUdp6MulticastLocked(nativeIfaces, !opts.automatic)
 		}
 		if err6 == nil {
 			if err6 = preparePacket6(ipv6conn); err6 != nil {
 				ipv6conn.Close()
 				ipv6conn = nil
+				joined6 = nil
 			}
 		}
 	}
 	if err6 != nil {
 		log.Printf("[zeroconf] no suitable IPv6 interface: %s", err6.Error())
 	}
-	for _, iface := range ifaces {
-		if (ipv4conn == nil || !hasInterface(ifaces4, iface.Index)) && (ipv6conn == nil || !hasInterface(ifaces6, iface.Index)) {
+	if opts.automatic {
+		ifaces4 = joined4
+		if runtime.GOOS == "windows" {
+			ifaces6 = canonicalJoinedInterfaces(joined6, ifaces6, ipv6Indexes)
+		} else {
+			ifaces6 = joined6
+		}
+		ifaces = interfacesWithTransport(ifaces, ifaces4, ifaces6)
+		if len(ifaces) == 0 {
 			if ipv4conn != nil {
 				ipv4conn.Close()
 			}
 			if ipv6conn != nil {
 				ipv6conn.Close()
 			}
-			return nil, fmt.Errorf("no usable mDNS transport for required interface %s (%d)", iface.Name, iface.Index)
+			return nil, fmt.Errorf("no usable mDNS transport on automatically selected interfaces (IPv4: %v; IPv6: %v)", err4, err6)
+		}
+	} else {
+		for _, iface := range ifaces {
+			if (ipv4conn == nil || !hasInterface(ifaces4, iface.Index)) && (ipv6conn == nil || !hasInterface(ifaces6, iface.Index)) {
+				if ipv4conn != nil {
+					ipv4conn.Close()
+				}
+				if ipv6conn != nil {
+					ipv6conn.Close()
+				}
+				return nil, fmt.Errorf("no usable mDNS transport for required interface %s (%d)", iface.Name, iface.Index)
+			}
 		}
 	}
 
@@ -268,10 +332,12 @@ func newServer(ifaces []net.Interface, opts serverOpts) (*Server, error) {
 		unicastProbes:  unicastProbes,
 		ipv6conn:       ipv6conn,
 		ipv6IfIndexes:  ipv6Indexes,
+		automatic:      opts.automatic,
 		ifaces:         ifaces,
 		ipv4Ifaces:     ifaces4,
 		ipv6Ifaces:     ifaces6,
 		ttl:            opts.ttl,
+		hostTTL:        opts.hostTTL,
 		shouldShutdown: make(chan struct{}),
 		ready:          make(chan struct{}),
 		done:           make(chan struct{}),
@@ -303,6 +369,9 @@ func (s *Server) start() {
 // SetText updates the TXT records. Tentative records are updated without an
 // announcement; established records are announced on their established links.
 func (s *Server) SetText(text []string) {
+	if s.service == nil {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.isShutdown {
@@ -312,6 +381,9 @@ func (s *Server) SetText(text []string) {
 	for index, state := range s.probes {
 		if state.established {
 			if err := s.announce(index, s.ttl); err != nil {
+				if s.dropFailedInterface(index, err) {
+					continue
+				}
 				s.stopLocked(err)
 				return
 			}
@@ -329,6 +401,7 @@ func (s *Server) SetText(text []string) {
 // Deprecated: This method is racy. Use the TTL server option instead.
 func (s *Server) TTL(ttl uint32) {
 	s.ttl = ttl
+	s.hostTTL = ttl
 }
 
 // Shutdown closes all udp connections and unregisters the service
@@ -485,12 +558,18 @@ func (s *Server) handleQuery(query *dns.Msg, ifIndex int, from net.Addr) error {
 		if isUnicastQuestion(q) {
 			// Send unicast
 			if e := s.unicastResponse(&resp, ifIndex, from); e != nil {
+				if s.dropFailedInterface(ifIndex, e) {
+					return nil
+				}
 				s.stopLocked(e)
 				return e
 			}
 		} else {
 			// Send mulicast
 			if e := s.sendMulticast(&resp, ifIndex); e != nil {
+				if s.dropFailedInterface(ifIndex, e) {
+					return nil
+				}
 				s.stopLocked(e)
 				return e
 			}
@@ -528,7 +607,8 @@ func isKnownAnswer(resp *dns.Msg, query *dns.Msg) bool {
 
 // handleQuestion is used to handle an incoming question
 func (s *Server) handleQuestion(q dns.Question, resp *dns.Msg, query *dns.Msg, ifIndex int) error {
-	if s.service == nil {
+	host := s.hostnameData()
+	if host.name == "" {
 		return nil
 	}
 
@@ -539,8 +619,11 @@ func (s *Server) handleQuestion(q dns.Question, resp *dns.Msg, query *dns.Msg, i
 	if q.Qclass & ^qClassCacheFlush != dns.ClassINET && q.Qclass & ^qClassCacheFlush != dns.ClassANY {
 		return nil
 	}
-	if sameMDNSName(q.Name, s.service.HostName) {
-		resp.Answer = s.appendAddrsForType(resp.Answer, s.ttl, ifIndex, true, q.Qtype)
+	if sameMDNSName(q.Name, host.name) {
+		resp.Answer = s.appendAddrsForType(resp.Answer, s.hostTTL, ifIndex, true, q.Qtype)
+		return nil
+	}
+	if s.service == nil {
 		return nil
 	}
 
@@ -611,10 +694,19 @@ func (s *Server) composeBrowsingAnswers(resp *dns.Msg, ifIndex int) {
 	}
 	resp.Extra = append(resp.Extra, srv, txt)
 
-	resp.Extra = s.appendAddrs(resp.Extra, s.ttl, ifIndex, false)
+	resp.Extra = s.appendAddrs(resp.Extra, s.hostTTL, ifIndex, false)
 }
 
 func (s *Server) composeLookupAnswers(resp *dns.Msg, ttl uint32, ifIndex int, flushCache bool) {
+	hostTTL := s.hostTTL
+	if ttl == 0 {
+		hostTTL = 0
+	}
+	if s.service == nil {
+		resp.Answer = s.appendAddrs(resp.Answer, hostTTL, ifIndex, flushCache)
+		return
+	}
+
 	// From RFC6762
 	//    The most significant bit of the rrclass for a record in the Answer
 	//    Section of a response message is the Multicast DNS cache-flush bit
@@ -674,7 +766,7 @@ func (s *Server) composeLookupAnswers(resp *dns.Msg, ttl uint32, ifIndex int, fl
 			})
 	}
 
-	resp.Answer = s.appendAddrs(resp.Answer, ttl, ifIndex, flushCache)
+	resp.Answer = s.appendAddrs(resp.Answer, hostTTL, ifIndex, flushCache)
 }
 
 func (s *Server) serviceTypeName(resp *dns.Msg, ttl uint32) {
@@ -703,8 +795,9 @@ func (s *Server) appendAddrs(list []dns.RR, ttl uint32, ifIndex int, flushCache 
 }
 
 func (s *Server) appendAddrsForType(list []dns.RR, ttl uint32, ifIndex int, flushCache bool, qtype uint16) []dns.RR {
-	v4 := s.service.AddrIPv4
-	v6 := s.service.AddrIPv6
+	host := s.hostnameData()
+	v4 := host.v4
+	v6 := host.v6
 	if s.interfaceAddrs != nil {
 		v4, v6 = nil, nil
 		for _, ip := range s.interfaceAddrs[ifIndex] {
@@ -723,11 +816,6 @@ func (s *Server) appendAddrsForType(list []dns.RR, ttl uint32, ifIndex int, flus
 			v6 = append(v6, a6...)
 		}
 	}
-	if ttl > 0 {
-		// RFC6762 Section 10 recommends 120s for A/AAAA records so they
-		// account for network interface and address changes.
-		ttl = 120
-	}
 	var cacheFlushBit uint16
 	if flushCache {
 		cacheFlushBit = qClassCacheFlush
@@ -735,7 +823,7 @@ func (s *Server) appendAddrsForType(list []dns.RR, ttl uint32, ifIndex int, flus
 	if qtype == dns.TypeA || qtype == dns.TypeANY {
 		for _, ip := range v4 {
 			list = append(list, &dns.A{
-				Hdr: dns.RR_Header{Name: s.service.HostName, Rrtype: dns.TypeA, Class: dns.ClassINET | cacheFlushBit, Ttl: ttl},
+				Hdr: dns.RR_Header{Name: host.name, Rrtype: dns.TypeA, Class: dns.ClassINET | cacheFlushBit, Ttl: ttl},
 				A:   ip,
 			})
 		}
@@ -743,15 +831,15 @@ func (s *Server) appendAddrsForType(list []dns.RR, ttl uint32, ifIndex int, flus
 	if qtype == dns.TypeAAAA || qtype == dns.TypeANY {
 		for _, ip := range v6 {
 			list = append(list, &dns.AAAA{
-				Hdr:  dns.RR_Header{Name: s.service.HostName, Rrtype: dns.TypeAAAA, Class: dns.ClassINET | cacheFlushBit, Ttl: ttl},
+				Hdr:  dns.RR_Header{Name: host.name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET | cacheFlushBit, Ttl: ttl},
 				AAAA: ip,
 			})
 		}
 	}
 	if len(v4)+len(v6) > 0 && (len(v4) == 0 || len(v6) == 0) {
 		list = append(list, &dns.NSEC{
-			Hdr:        dns.RR_Header{Name: s.service.HostName, Rrtype: dns.TypeNSEC, Class: dns.ClassINET | cacheFlushBit, Ttl: ttl},
-			NextDomain: s.service.HostName,
+			Hdr:        dns.RR_Header{Name: host.name, Rrtype: dns.TypeNSEC, Class: dns.ClassINET | cacheFlushBit, Ttl: ttl},
+			NextDomain: host.name,
 			TypeBitMap: addressTypeBitmap(v4, v6),
 		})
 	}
@@ -826,6 +914,9 @@ func (s *Server) multicastResponse(msg *dns.Msg, ifIndex int) error {
 	if err != nil {
 		return fmt.Errorf("failed to pack msg %v: %w", msg, err)
 	}
+	if s.automatic {
+		return s.multicastResponseAutomatic(buf, ifIndex)
+	}
 	if s.ipv4conn != nil && (ifIndex == 0 || hasInterface(s.ipv4Ifaces, ifIndex)) {
 		// Windows packet information is handled by the native message adapter.
 		var wcm ipv4.ControlMessage
@@ -892,6 +983,95 @@ func (s *Server) multicastResponse(msg *dns.Msg, ifIndex int) error {
 		}
 	}
 	return nil
+}
+
+func (s *Server) multicastResponseAutomatic(buf []byte, ifIndex int) error {
+	if ifIndex != 0 {
+		iface, ok := automaticInterface(s.ifaces, ifIndex)
+		if !ok {
+			return nil
+		}
+		sent, err := s.multicastResponseOnInterface(buf, iface)
+		if sent {
+			return nil
+		}
+		return err
+	}
+
+	sentAny := false
+	var firstErr error
+	for _, iface := range append([]net.Interface(nil), s.ifaces...) {
+		sent, err := s.multicastResponseOnInterface(buf, iface)
+		if sent {
+			sentAny = true
+			continue
+		}
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			log.Printf("[zeroconf] dropping automatic mDNS interface %d after send failure: %v", iface.Index, err)
+			s.discardAutomaticInterface(iface.Index)
+		}
+	}
+	if sentAny {
+		return nil
+	}
+	return firstErr
+}
+
+func automaticInterface(interfaces []net.Interface, index int) (net.Interface, bool) {
+	for _, iface := range interfaces {
+		if iface.Index == index {
+			return iface, true
+		}
+	}
+	return net.Interface{}, false
+}
+
+func (s *Server) multicastResponseOnInterface(buf []byte, iface net.Interface) (bool, error) {
+	sent := false
+	var firstErr error
+	record := func(err error) {
+		if err == nil {
+			sent = true
+		} else if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if s.ipv4conn != nil && hasInterface(s.ipv4Ifaces, iface.Index) {
+		var cm ipv4.ControlMessage
+		nativeInterface := runtime.GOOS == "darwin" || runtime.GOOS == "ios" || runtime.GOOS == "linux" || runtime.GOOS == "windows"
+		if nativeInterface {
+			cm.IfIndex = iface.Index
+		} else if err := s.ipv4conn.SetMulticastInterface(&iface); err != nil {
+			record(err)
+		} else {
+			_, err := s.writePacket4(buf, &cm, ipv4Addr)
+			record(err)
+		}
+		if nativeInterface {
+			_, err := s.writePacket4(buf, &cm, ipv4Addr)
+			record(err)
+		}
+	}
+	if s.ipv6conn != nil && hasInterface(s.ipv6Ifaces, iface.Index) {
+		var cm ipv6.ControlMessage
+		nativeInterface := runtime.GOOS == "darwin" || runtime.GOOS == "ios" || runtime.GOOS == "linux" || runtime.GOOS == "windows"
+		if nativeInterface {
+			cm.IfIndex = iface.Index
+		} else if err := s.ipv6conn.SetMulticastInterface(&iface); err != nil {
+			record(err)
+		} else {
+			_, err := s.writePacket6(buf, &cm, ipv6Addr)
+			record(err)
+		}
+		if nativeInterface {
+			_, err := s.writePacket6(buf, &cm, ipv6Addr)
+			record(err)
+		}
+	}
+	return sent, firstErr
 }
 
 func isUnicastQuestion(q dns.Question) bool {

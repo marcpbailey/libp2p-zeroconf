@@ -503,3 +503,28 @@ func TestForkChangedSnapshotReplacement(t *testing.T) {
 		})
 	}
 }
+
+func TestForkCloneIntegratedMetadata(t *testing.T) {
+	entry := &ServiceEntry{
+		ServiceRecord: ServiceRecord{Subtypes: []string{"_secure._sub._http._tcp.local."}},
+		Text:          []string{"id=one"},
+		TXTRecords:    [][]string{{"id=one", "variant=a"}},
+		AddrIPv4:      []net.IP{net.ParseIP("192.0.2.10")},
+		SRVCandidates: []SRVCandidate{{HostName: "a.example.test.", Port: 8080, AddrIPv6: []net.IP{net.ParseIP("2001:db8::10")}}},
+	}
+	cloned := cloneServiceEntry(entry)
+	entry.Subtypes[0] = "changed"
+	entry.Text[0] = "changed"
+	entry.TXTRecords[0][1] = "changed"
+	entry.AddrIPv4[0][0] = 198
+	entry.SRVCandidates[0].AddrIPv6[0][0] = 0x20
+	if cloned.Subtypes[0] == "changed" || cloned.Text[0] == "changed" || cloned.TXTRecords[0][1] == "changed" ||
+		cloned.AddrIPv4[0].String() != "192.0.2.10" || cloned.SRVCandidates[0].AddrIPv6[0].String() != "2001:db8::10" {
+		t.Fatalf("clone aliases source entry: %#v", cloned)
+	}
+	cloned.TXTRecords[0][0] = "clone changed"
+	cloned.SRVCandidates[0].AddrIPv6[0][0] = 0x30
+	if entry.TXTRecords[0][0] != "id=one" || entry.SRVCandidates[0].AddrIPv6[0][0] != 0x20 {
+		t.Fatalf("source entry aliases clone: %#v", entry)
+	}
+}
