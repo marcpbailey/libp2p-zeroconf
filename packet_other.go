@@ -14,15 +14,15 @@ func preparePacket6(c *ipv6.PacketConn) error { return c.SetControlMessage(ipv6.
 func nativeIPv6Interfaces(ifaces []net.Interface) ([]net.Interface, map[int]int, error) {
 	return ifaces, nil, nil
 }
-func (s *Server) readPacket4(c *ipv4.PacketConn, b []byte) (int, *ipv4.ControlMessage, net.Addr, error) {
+func readMulticast4(c *ipv4.PacketConn, b []byte) (int, *ipv4.ControlMessage, net.Addr, error) {
 	return c.ReadFrom(b)
 }
-func (s *Server) readPacket6(c *ipv6.PacketConn, b []byte) (int, *ipv6.ControlMessage, net.Addr, error) {
+func readMulticast6(c *ipv6.PacketConn, b []byte, indexes map[int]int) (int, *ipv6.ControlMessage, net.Addr, error) {
 	return c.ReadFrom(b)
 }
-func (s *Server) writePacket4(b []byte, cm *ipv4.ControlMessage, to net.Addr) (int, error) {
-	return s.ipv4conn.WriteTo(b, cm, to)
+func writeMulticast4(c *ipv4.PacketConn, b []byte, cm *ipv4.ControlMessage, to net.Addr) (int, error) {
+	return c.WriteTo(b, cm, to)
 }
-func (s *Server) writePacket6(b []byte, cm *ipv6.ControlMessage, to net.Addr) (int, error) {
-	return s.ipv6conn.WriteTo(b, cm, to)
+func writeMulticast6(c *ipv6.PacketConn, b []byte, cm *ipv6.ControlMessage, to net.Addr, indexes map[int]int) (int, error) {
+	return c.WriteTo(b, cm, to)
 }
