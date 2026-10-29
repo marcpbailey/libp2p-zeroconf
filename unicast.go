@@ -50,21 +50,14 @@ func resolverAddress(address string) (string, error) {
 	return net.JoinHostPort(host, port), nil
 }
 
-func runUnicast(ctx context.Context, instance, service, domain string, entries chan<- *ServiceEntry, browsing bool, opts clientOpts) error {
-	if domain == "" || entries == nil {
-		return fmt.Errorf("unicast discovery requires a domain and results channel")
-	}
-	params := newLookupParams(instance, service, domain, browsing, entries)
-	if _, ok := dns.IsDomainName(params.ServiceName()); !ok {
-		return fmt.Errorf("invalid service name: %q", params.ServiceName())
-	}
+func unicastResolvers(ctx context.Context, opts clientOpts) (func(string) []string, error) {
 	var servers func(string) []string
 	if len(opts.resolvers) > 0 {
 		addresses := make([]string, 0, len(opts.resolvers))
 		for _, address := range opts.resolvers {
 			normalized, err := resolverAddress(address)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			addresses = append(addresses, normalized)
 		}
@@ -73,8 +66,23 @@ func runUnicast(ctx context.Context, instance, service, domain string, entries c
 		var err error
 		servers, err = systemResolvers(ctx)
 		if err != nil {
-			return err
+			return nil, err
 		}
+	}
+	return servers, nil
+}
+
+func runUnicast(ctx context.Context, instance, service, domain string, entries chan<- *ServiceEntry, browsing bool, opts clientOpts) error {
+	if domain == "" || entries == nil {
+		return fmt.Errorf("unicast discovery requires a domain and results channel")
+	}
+	params := newLookupParams(instance, service, domain, browsing, entries)
+	if _, ok := dns.IsDomainName(params.ServiceName()); !ok {
+		return fmt.Errorf("invalid service name: %q", params.ServiceName())
+	}
+	servers, err := unicastResolvers(ctx, opts)
+	if err != nil {
+		return err
 	}
 	defer close(entries)
 	c := &unicastClient{servers: servers, cache: make(map[dns.Question]*dnsAnswer)}
@@ -213,21 +221,8 @@ func (c *unicastClient) query(ctx context.Context, name string, qtype uint16) *d
 		return previous
 	}
 	for _, address := range c.servers(q.Name) {
-		attempt, cancel := context.WithTimeout(ctx, 2*time.Second)
-		m := new(dns.Msg)
-		m.SetQuestion(q.Name, qtype)
-		m.SetEdns0(1232, false)
-		reply, err := exchangeDNS(attempt, m, address, "udp")
-		if err == nil && reply != nil && (reply.Rcode == dns.RcodeFormatError || reply.Rcode == dns.RcodeNotImplemented || reply.Rcode == dns.RcodeBadVers) {
-			// Some ordinary DNS resolvers do not support EDNS. Retry plain DNS.
-			m.Extra = nil
-			reply, err = exchangeDNS(attempt, m, address, "udp")
-		}
-		if err == nil && reply != nil && reply.Truncated {
-			reply, err = exchangeDNS(attempt, m, address, "tcp")
-		}
-		cancel()
-		if err != nil || reply == nil || reply.Truncated || !reply.Response || reply.Opcode != dns.OpcodeQuery || len(reply.Question) != 1 || reply.Question[0] != q {
+		reply, err := exchangeDNSQuestion(ctx, q, address)
+		if err != nil {
 			continue
 		}
 		answer, err := parseDNSAnswer(reply, q, time.Now())
@@ -243,6 +238,33 @@ func (c *unicastClient) query(ctx context.Context, name string, qtype uint16) *d
 	}
 	previous.refresh = time.Now().Add(time.Second)
 	return previous
+}
+
+func exchangeDNSQuestion(ctx context.Context, q dns.Question, address string) (*dns.Msg, error) {
+	attempt, cancel := context.WithTimeout(ctx, 2*time.Second)
+	m := new(dns.Msg)
+	m.SetQuestion(q.Name, q.Qtype)
+	m.SetEdns0(1232, false)
+	reply, err := exchangeDNS(attempt, m, address, "udp")
+	if err == nil && reply != nil && (reply.Rcode == dns.RcodeFormatError || reply.Rcode == dns.RcodeNotImplemented || reply.Rcode == dns.RcodeBadVers) {
+		// Some ordinary DNS resolvers do not support EDNS. Retry plain DNS.
+		m.Extra = nil
+		reply, err = exchangeDNS(attempt, m, address, "udp")
+	}
+	if err == nil && reply != nil && reply.Truncated {
+		reply, err = exchangeDNS(attempt, m, address, "tcp")
+	}
+	cancel()
+	if err != nil {
+		return nil, err
+	}
+	if reply == nil || reply.Truncated || !reply.Response || reply.Opcode != dns.OpcodeQuery || len(reply.Question) != 1 || reply.Question[0] != q {
+		return nil, fmt.Errorf("invalid DNS response for %s", q.Name)
+	}
+	if reply.Rcode != dns.RcodeSuccess && reply.Rcode != dns.RcodeNameError {
+		return nil, fmt.Errorf("DNS response for %s: %s", q.Name, dns.RcodeToString[reply.Rcode])
+	}
+	return reply, nil
 }
 
 func parseDNSAnswer(m *dns.Msg, q dns.Question, now time.Time) (*dnsAnswer, error) {
@@ -399,9 +421,10 @@ func exchangeDNS(ctx context.Context, message *dns.Msg, address, network string)
 		return nil, err
 	}
 	defer connection.Close()
-	done := make(chan struct{})
-	defer close(done)
+	done, stopped := make(chan struct{}), make(chan struct{})
+	defer func() { close(done); <-stopped }()
 	go func() {
+		defer close(stopped)
 		select {
 		case <-ctx.Done():
 			connection.Close()
@@ -415,6 +438,9 @@ func exchangeDNS(ctx context.Context, message *dns.Msg, address, network string)
 	response, _, err := (&dns.Client{Net: network, Timeout: timeout}).ExchangeWithConn(message, &dns.Conn{Conn: connection})
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
+	}
+	if deadline, ok := ctx.Deadline(); err != nil && ok && !time.Now().Before(deadline) {
+		return nil, context.DeadlineExceeded
 	}
 	return response, err
 }

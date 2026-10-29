@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 )
 
 // Windows WSACMSGHDR uses SIZE_T followed by two 32-bit integers. Packet-info
@@ -134,4 +137,18 @@ func interfaceFamilies(addresses []net.Addr) (ipv4, ipv6 bool) {
 		}
 	}
 	return
+}
+
+// Server wrappers preserve registration behavior while sharing platform packet I/O.
+func (s *Server) readPacket4(c *ipv4.PacketConn, b []byte) (int, *ipv4.ControlMessage, net.Addr, error) {
+	return readMulticast4(c, b)
+}
+func (s *Server) readPacket6(c *ipv6.PacketConn, b []byte) (int, *ipv6.ControlMessage, net.Addr, error) {
+	return readMulticast6(c, b, s.ipv6IfIndexes)
+}
+func (s *Server) writePacket4(b []byte, cm *ipv4.ControlMessage, to net.Addr) (int, error) {
+	return writeMulticast4(s.ipv4conn, b, cm, to)
+}
+func (s *Server) writePacket6(b []byte, cm *ipv6.ControlMessage, to net.Addr) (int, error) {
+	return writeMulticast6(s.ipv6conn, b, cm, to, s.ipv6IfIndexes)
 }

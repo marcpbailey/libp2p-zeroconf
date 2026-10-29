@@ -60,6 +60,22 @@ Use the opt-in `UnicastDNS()` client option with Browse or Lookup. Existing call
 // Example filled soon.
 ```
 
+## Resolve a hostname without a service
+
+```go
+results, err := zeroconf.LookupHostname(ctx, zeroconf.HostnameQuery{
+    Name: "api.dev.example.local.",
+    Families: zeroconf.IPv4AndIPv6,
+    Duration: 2 * time.Second,
+}, zeroconf.SelectIPTraffic(zeroconf.IPv4))
+```
+
+This sends A and AAAA questions over IPv4 multicast without requiring a service
+instance, PTR, SRV or TXT record. Other fully qualified names use configured DNS
+automatically. Use `HostnameQuery.Transport` to force multicast or unicast, or
+`UnicastDNS(...)` to select DNS servers. See [hostname lookup](HOSTNAME_LOOKUP.md)
+for transport controls, completion, partial results, TTLs and interface scoping.
+
 ## Register a service
 
 `Register` and `RegisterProxy` return after transport setup and start probing asynchronously.

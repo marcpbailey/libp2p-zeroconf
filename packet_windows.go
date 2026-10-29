@@ -78,16 +78,16 @@ func readWindowsPacket(c net.PacketConn, b []byte, ipv6 bool) (int, int, net.Add
 	index, err := windowsPacketInterface(control[:cn], strconv.IntSize/8, ipv6)
 	return n, index, source, err
 }
-func (s *Server) readPacket4(c *ipv4.PacketConn, b []byte) (int, *ipv4.ControlMessage, net.Addr, error) {
+func readMulticast4(c *ipv4.PacketConn, b []byte) (int, *ipv4.ControlMessage, net.Addr, error) {
 	n, index, source, err := readWindowsPacket(c.PacketConn, b, false)
 	return n, &ipv4.ControlMessage{IfIndex: index}, source, err
 }
-func (s *Server) readPacket6(c *ipv6.PacketConn, b []byte) (int, *ipv6.ControlMessage, net.Addr, error) {
+func readMulticast6(c *ipv6.PacketConn, b []byte, indexes map[int]int) (int, *ipv6.ControlMessage, net.Addr, error) {
 	n, index, source, err := readWindowsPacket(c.PacketConn, b, true)
-	canonical := canonicalIPv6Index(index, s.ipv6IfIndexes)
+	canonical := canonicalIPv6Index(index, indexes)
 	return n, &ipv6.ControlMessage{IfIndex: canonical}, source, err
 }
-func (s *Server) writePacket4(b []byte, cm *ipv4.ControlMessage, to net.Addr) (int, error) {
+func writeMulticast4(c *ipv4.PacketConn, b []byte, cm *ipv4.ControlMessage, to net.Addr) (int, error) {
 	index := 0
 	var source net.IP
 	if cm != nil {
@@ -103,14 +103,14 @@ func (s *Server) writePacket4(b []byte, cm *ipv4.ControlMessage, to net.Addr) (i
 			}
 		}
 	}
-	return writeWindowsPacket(s.ipv4conn.PacketConn, b, index, false, to, source)
+	return writeWindowsPacket(c.PacketConn, b, index, false, to, source)
 }
-func (s *Server) writePacket6(b []byte, cm *ipv6.ControlMessage, to net.Addr) (int, error) {
+func writeMulticast6(c *ipv6.PacketConn, b []byte, cm *ipv6.ControlMessage, to net.Addr, indexes map[int]int) (int, error) {
 	index := 0
 	var source net.IP
 	if cm != nil && cm.IfIndex != 0 {
 		canonicalIndex := cm.IfIndex
-		index = s.ipv6IfIndexes[canonicalIndex]
+		index = indexes[canonicalIndex]
 		if index == 0 {
 			return 0, fmt.Errorf("no native IPv6 index for interface %d", cm.IfIndex)
 		}
@@ -123,7 +123,7 @@ func (s *Server) writePacket6(b []byte, cm *ipv6.ControlMessage, to net.Addr) (i
 			return 0, err
 		}
 	}
-	return writeWindowsPacket(s.ipv6conn.PacketConn, b, index, true, to, source)
+	return writeWindowsPacket(c.PacketConn, b, index, true, to, source)
 }
 func writeWindowsPacket(c net.PacketConn, b []byte, index int, ipv6 bool, to net.Addr, source net.IP) (int, error) {
 	var control []byte

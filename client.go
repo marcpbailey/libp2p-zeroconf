@@ -32,10 +32,11 @@ var initialQueryInterval = 4 * time.Second
 
 // Client structure encapsulates both IPv4/IPv6 UDP connections.
 type client struct {
-	ipv4conn        *ipv4.PacketConn
-	ipv6conn        *ipv6.PacketConn
-	ifaces          []net.Interface
-	unannouncements bool
+	ipv4conn          *ipv4.PacketConn
+	ipv6conn          *ipv6.PacketConn
+	ifaces            []net.Interface
+	unannouncements   bool
+	hostnameTransport *hostnameTransport
 }
 
 type clientOpts struct {
@@ -44,6 +45,7 @@ type clientOpts struct {
 	unannouncements bool
 	unicast         bool
 	resolvers       []string
+	hostname        bool
 }
 
 // ClientOption fills the option struct to configure intefaces, etc.
@@ -156,17 +158,43 @@ func newClient(opts clientOpts) (*client, error) {
 	if len(ifaces) == 0 {
 		ifaces = listMulticastInterfaces()
 	}
+	var hostname *hostnameTransport
+	ifaces4, ifaces6 := ifaces, ifaces
+	if opts.hostname {
+		var err error
+		ifaces, hostname, err = hostnameInterfaces(opts)
+		if err != nil {
+			return nil, err
+		}
+		ifaces4, ifaces6 = hostname.ipv4Ifaces, hostname.nativeIPv6
+	}
 	// IPv4 interfaces
 	var ipv4conn *ipv4.PacketConn
 	var err4 error
 	if (opts.listenOn & IPv4) > 0 {
-		ipv4conn, err4 = joinUdp4Multicast(ifaces)
+		if !opts.hostname || len(ifaces4) != 0 {
+			ipv4conn, err4 = joinUdp4Multicast(ifaces4, opts.hostname)
+			if err4 == nil && opts.hostname {
+				if err4 = preparePacket4(ipv4conn); err4 != nil {
+					ipv4conn.Close()
+					ipv4conn = nil
+				}
+			}
+		}
 	}
 	// IPv6 interfaces
 	var ipv6conn *ipv6.PacketConn
 	var err6 error
 	if (opts.listenOn & IPv6) > 0 {
-		ipv6conn, err6 = joinUdp6Multicast(ifaces)
+		if !opts.hostname || len(ifaces6) != 0 {
+			ipv6conn, err6 = joinUdp6Multicast(ifaces6, opts.hostname)
+			if err6 == nil && opts.hostname {
+				if err6 = preparePacket6(ipv6conn); err6 != nil {
+					ipv6conn.Close()
+					ipv6conn = nil
+				}
+			}
+		}
 	}
 	if ipv4conn == nil && ipv6conn == nil {
 		switch {
@@ -181,11 +209,25 @@ func newClient(opts clientOpts) (*client, error) {
 		}
 	}
 
+	if opts.hostname {
+		for _, iface := range ifaces {
+			if (ipv4conn == nil || !hasInterface(hostname.ipv4Ifaces, iface.Index)) && (ipv6conn == nil || !hasInterface(hostname.ipv6Ifaces, iface.Index)) {
+				if ipv4conn != nil {
+					ipv4conn.Close()
+				}
+				if ipv6conn != nil {
+					ipv6conn.Close()
+				}
+				return nil, fmt.Errorf("no usable mDNS transport on interface %d (IPv4: %v; IPv6: %v)", iface.Index, err4, err6)
+			}
+		}
+	}
 	return &client{
-		ipv4conn:        ipv4conn,
-		ipv6conn:        ipv6conn,
-		ifaces:          ifaces,
-		unannouncements: opts.unannouncements,
+		hostnameTransport: hostname,
+		ipv4conn:          ipv4conn,
+		ipv6conn:          ipv6conn,
+		ifaces:            ifaces,
+		unannouncements:   opts.unannouncements,
 	}, nil
 }
 
@@ -459,53 +501,66 @@ func (c *client) shutdown() {
 // Data receiving routine reads from connection, unpacks packets into dns.Msg
 // structures and sends them to a given msgCh channel
 func (c *client) recv(ctx context.Context, l interface{}, msgCh chan *dns.Msg) {
-	var readFrom func([]byte) (n int, src net.Addr, err error)
+	_ = c.receive(ctx, l, func(msg *dns.Msg, _ int, _ net.Addr) bool {
+		select {
+		case msgCh <- msg:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	})
+}
+
+// receive shares decoding with service discovery, retaining metadata when requested.
+func (c *client) receive(ctx context.Context, l interface{}, deliver func(*dns.Msg, int, net.Addr) bool) error {
+	var readFrom func([]byte) (n int, index int, src net.Addr, err error)
 
 	switch pConn := l.(type) {
 	case *ipv6.PacketConn:
-		readFrom = func(b []byte) (n int, src net.Addr, err error) {
-			n, _, src, err = pConn.ReadFrom(b)
+		readFrom = func(b []byte) (n int, index int, src net.Addr, err error) {
+			var cm *ipv6.ControlMessage
+			if c.hostnameTransport != nil {
+				n, cm, src, err = readMulticast6(pConn, b, c.hostnameTransport.ipv6Indexes)
+			} else {
+				n, cm, src, err = pConn.ReadFrom(b)
+			}
+			if cm != nil {
+				index = cm.IfIndex
+			}
 			return
 		}
 	case *ipv4.PacketConn:
-		readFrom = func(b []byte) (n int, src net.Addr, err error) {
-			n, _, src, err = pConn.ReadFrom(b)
+		readFrom = func(b []byte) (n int, index int, src net.Addr, err error) {
+			var cm *ipv4.ControlMessage
+			if c.hostnameTransport != nil {
+				n, cm, src, err = readMulticast4(pConn, b)
+			} else {
+				n, cm, src, err = pConn.ReadFrom(b)
+			}
+			if cm != nil {
+				index = cm.IfIndex
+			}
 			return
 		}
 
 	default:
-		return
+		return fmt.Errorf("unsupported mDNS packet connection %T", l)
 	}
-
 	buf := make([]byte, 65536)
-	var fatalErr error
-	for {
-		// Handles the following cases:
-		// - ReadFrom aborts with error due to closed UDP connection -> causes ctx cancel
-		// - ReadFrom aborts otherwise.
-		// TODO: the context check can be removed. Verify!
-		if ctx.Err() != nil || fatalErr != nil {
-			return
-		}
-
-		n, _, err := readFrom(buf)
+	for ctx.Err() == nil {
+		n, index, source, err := readFrom(buf)
 		if err != nil {
-			fatalErr = err
-			continue
+			return err
 		}
 		msg := new(dns.Msg)
 		if err := msg.Unpack(buf[:n]); err != nil {
-			// log.Printf("[WARN] mdns: Failed to unpack packet: %v", err)
 			continue
 		}
-		select {
-		case msgCh <- msg:
-			// Submit decoded DNS message and continue.
-		case <-ctx.Done():
-			// Abort.
-			return
+		if !deliver(msg, index, source) {
+			return ctx.Err()
 		}
 	}
+	return ctx.Err()
 }
 
 // periodicQuery sens multiple probes until a valid response is received by
@@ -513,8 +568,15 @@ func (c *client) recv(ctx context.Context, l interface{}, msgCh chan *dns.Msg) {
 // TODO: move error reporting to shutdown function as periodicQuery is called from
 // go routine context.
 func (c *client) periodicQuery(ctx context.Context, params *lookupParams) error {
+	return periodicQuery(ctx, func() error { return c.query(params) }, params.stopProbing, params.isBrowsing)
+}
+
+func periodicQuery(ctx context.Context, query func() error, stop <-chan struct{}, browsing bool) error {
 	// Do the first query immediately.
-	if err := c.query(params); err != nil {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := query(); err != nil {
 		return err
 	}
 
@@ -526,18 +588,18 @@ func (c *client) periodicQuery(ctx context.Context, params *lookupParams) error 
 		select {
 		case <-timer.C:
 			// Wait for next iteration.
-		case <-params.stopProbing:
+		case <-stop:
 			// Chan is closed (or happened in the past).
 			// Done here. Received a matching mDNS entry.
 			return nil
 		case <-ctx.Done():
-			if params.isBrowsing {
+			if browsing {
 				return nil
 			}
 			return ctx.Err()
 		}
 
-		if err := c.query(params); err != nil {
+		if err := query(); err != nil {
 			return err
 		}
 		// Exponential increase of the interval with jitter:
@@ -580,6 +642,9 @@ func (c *client) sendQuery(msg *dns.Msg) error {
 	buf, err := msg.Pack()
 	if err != nil {
 		return err
+	}
+	if c.hostnameTransport != nil {
+		return c.sendHostnamePacket(buf)
 	}
 	if c.ipv4conn != nil {
 		// See https://pkg.go.dev/golang.org/x/net/ipv4#pkg-note-BUG
