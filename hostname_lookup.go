@@ -118,6 +118,9 @@ func LookupHostname(ctx context.Context, query HostnameQuery, opts ...ClientOpti
 
 func normalizeHostnameQuery(q HostnameQuery) (HostnameQuery, error) {
 	q.Name = dns.CanonicalName(q.Name)
+	if net.ParseIP(strings.TrimSuffix(q.Name, ".")) != nil {
+		return q, fmt.Errorf("hostname lookup requires a name, not an IP literal")
+	}
 	labels := strings.Split(strings.TrimSuffix(q.Name, "."), ".")
 	if _, ok := dns.IsDomainName(q.Name); !ok || len(labels) < 2 {
 		return q, fmt.Errorf("a fully qualified hostname with at least two labels is required")

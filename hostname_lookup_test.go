@@ -181,7 +181,7 @@ func TestHostnameRecordLifetime(t *testing.T) {
 }
 
 func TestHostnameValidationAndCancellation(t *testing.T) {
-	for _, name := range []string{"", "local.", "printer", "host..local", "host.local..", "bad name.local", "-bad.local", "bad_.local", "host\\046label.local"} {
+	for _, name := range []string{"", "local.", "printer", "192.0.2.10", "2001:db8::10", "host..local", "host.local..", "bad name.local", "-bad.local", "bad_.local", "host\\046label.local"} {
 		if _, err := normalizeHostnameQuery(HostnameQuery{Name: name}); err == nil {
 			t.Errorf("accepted %q", name)
 		}
