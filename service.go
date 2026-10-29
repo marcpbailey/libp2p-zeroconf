@@ -103,7 +103,20 @@ func (l *lookupParams) disableProbing() {
 // ServiceEntry represents a browse/lookup result for client API.
 // It is also used to configure service registration (server API), which is
 // used to answer multicast queries.
+// SRVCandidate retains one SRV record and the addresses of its target.
+// Selection among candidates is the caller's responsibility (RFC 2782).
+type SRVCandidate struct {
+	HostName string   `json:"hostname"`
+	Port     int      `json:"port"`
+	Priority uint16   `json:"priority"`
+	Weight   uint16   `json:"weight"`
+	AddrIPv4 []net.IP `json:"-"`
+	AddrIPv6 []net.IP `json:"-"`
+}
+
 type ServiceEntry struct {
+	TXTRecords    [][]string     `json:"txtRecords,omitempty"` // Unicast TXT records, preserving record boundaries (RFC 6763 section 6.8).
+	SRVCandidates []SRVCandidate `json:"srvCandidates,omitempty"`
 	ServiceRecord
 	HostName string    `json:"hostname"`          // Host machine DNS name
 	Port     int       `json:"port"`              // Service Port
@@ -129,8 +142,22 @@ func cloneServiceEntry(entry *ServiceEntry) *ServiceEntry {
 	cloned := *entry
 	cloned.Subtypes = cloneStrings(entry.Subtypes)
 	cloned.Text = cloneStrings(entry.Text)
+	if entry.TXTRecords != nil {
+		cloned.TXTRecords = make([][]string, len(entry.TXTRecords))
+		for index, record := range entry.TXTRecords {
+			cloned.TXTRecords[index] = cloneStrings(record)
+		}
+	}
 	cloned.AddrIPv4 = cloneIPs(entry.AddrIPv4)
 	cloned.AddrIPv6 = cloneIPs(entry.AddrIPv6)
+	if entry.SRVCandidates != nil {
+		cloned.SRVCandidates = make([]SRVCandidate, len(entry.SRVCandidates))
+		for index, candidate := range entry.SRVCandidates {
+			cloned.SRVCandidates[index] = candidate
+			cloned.SRVCandidates[index].AddrIPv4 = cloneIPs(candidate.AddrIPv4)
+			cloned.SRVCandidates[index].AddrIPv6 = cloneIPs(candidate.AddrIPv6)
+		}
+	}
 	return &cloned
 }
 
