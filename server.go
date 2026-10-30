@@ -123,7 +123,8 @@ func Register(instance, service, domain string, port int, text []string, ifaces 
 }
 
 // RegisterProxy registers a service proxy. This call will skip the hostname/IP lookup and
-// will use the provided values.
+// will use the provided values. Absolute hostnames ending in a dot retain their
+// domain; relative hostnames are qualified within the service domain.
 func RegisterProxy(instance, service, domain string, port int, host string, ips []string, text []string, ifaces []net.Interface, opts ...ServerOption) (*Server, error) {
 	entry := newServiceEntry(instance, service, domain)
 	entry.Port = port
@@ -146,7 +147,7 @@ func RegisterProxy(instance, service, domain string, port int, host string, ips 
 		return nil, fmt.Errorf("missing port")
 	}
 
-	if !strings.HasSuffix(trimDot(entry.HostName), entry.Domain) {
+	if !strings.HasSuffix(entry.HostName, ".") && !strings.HasSuffix(trimDot(entry.HostName), entry.Domain) {
 		entry.HostName = fmt.Sprintf("%s.%s.", trimDot(entry.HostName), trimDot(entry.Domain))
 	}
 
